@@ -76,8 +76,25 @@ a {
   cursor: pointer;
   padding: 0 15px;
 }
-.menuOption:hover .optionText {
+.menuOption:hover .optionText,
+.menuOption:focus .optionText {
   text-decoration: underline;
+}
+
+.menuOption:focus {
+  outline: 2px solid #3477db;
+  outline-offset: -2px;
+}
+
+/* Global actions group styling for visual distinction */
+#optsGlobal .menuOption {
+  font-weight: 500;
+  color: #2c5aa0;
+}
+
+#optsGlobal .menuOption:hover .optionText,
+#optsGlobal .menuOption:focus .optionText {
+  color: #1a4480;
 }
 /* dark theme for night lurkers */
 .dark {
@@ -86,4 +103,19 @@ a {
 }
 .dark .group {
   border-color: #555;
+}
+
+/* Dark theme for global actions */
+.dark #optsGlobal .menuOption {
+  color: #7bb3f0;
+}
+
+.dark #optsGlobal .menuOption:hover .optionText,
+.dark #optsGlobal .menuOption:focus .optionText {
+  color: #a8c8f0;
+}
+
+/* Dark theme focus styling */
+.dark .menuOption:focus {
+  outline-color: #7bb3f0;
 }

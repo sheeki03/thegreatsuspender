@@ -1,4 +1,4 @@
-/*global chrome, gsAnalytics, gsSession, localStorage, gsUtils */
+/*global chrome, gsSession, localStorage, gsUtils */
 'use strict';
 
 // Used to keep track of which settings were defined in the managed storage
@@ -26,7 +26,6 @@ const gsStorageSettings = {
   DISCARD_AFTER_SUSPEND: 'discardAfterSuspend',
   DISCARD_IN_PLACE_OF_SUSPEND: 'discardInPlaceOfSuspend',
   USE_ALT_SCREEN_CAPTURE_LIB: 'useAlternateScreenCaptureLib',
-  TRACKING_OPT_OUT: 'trackingOptOut',
   ENABLE_CLEAN_SCREENCAPS: 'cleanScreencaps'
 };
 
@@ -37,10 +36,7 @@ var gsStorage = {
   LAST_NOTICE: 'gsNotice',
   LAST_EXTENSION_RECOVERY: 'gsExtensionRecovery',
 
-  SM_SESSION_METRICS: 'gsSessionMetrics',
-  SM_TIMESTAMP: 'sessionTimestamp',
-  SM_SUSPENDED_TAB_COUNT: 'suspendedTabCount',
-  SM_TOTAL_TAB_COUNT: 'totalTabCount',
+  // Session metrics constants removed for privacy
 
   noop: function() {},
 
@@ -66,7 +62,6 @@ var gsStorage = {
     defaults[gsStorage.NO_NAG] = false;
     defaults[gsStorage.WHITELIST] = '';
     defaults[gsStorage.THEME] = 'light';
-    defaults[gsStorage.TRACKING_OPT_OUT] = false;
     defaults[gsStorage.ENABLE_CLEAN_SCREENCAPS] = false;
 
     return defaults;
@@ -305,7 +300,6 @@ var gsStorage = {
   saveSettings: function(settings) {
     try {
       localStorage.setItem('gsSettings', JSON.stringify(settings));
-      gsAnalytics.setUserDimensions();
     } catch (e) {
       gsUtils.error(
         'gsStorage',
@@ -425,35 +419,7 @@ var gsStorage = {
     }
   },
 
-  fetchSessionMetrics: function() {
-    var sessionMetrics = {};
-    try {
-      sessionMetrics = JSON.parse(
-        localStorage.getItem(gsStorage.SM_SESSION_METRICS)
-      );
-    } catch (e) {
-      gsUtils.error(
-        'gsStorage',
-        'Failed to parse ' + gsStorage.SM_SESSION_METRICS + ': ',
-        localStorage.getItem(gsStorage.SM_SESSION_METRICS)
-      );
-    }
-    return sessionMetrics;
-  },
-  setSessionMetrics: function(sessionMetrics) {
-    try {
-      localStorage.setItem(
-        gsStorage.SM_SESSION_METRICS,
-        JSON.stringify(sessionMetrics)
-      );
-    } catch (e) {
-      gsUtils.error(
-        'gsStorage',
-        'failed to save ' + gsStorage.SM_SESSION_METRICS + ' to local storage',
-        e
-      );
-    }
-  },
+  // Session metrics tracking functions removed for privacy
 
   /**
    * Used by the options page to tell whether an option is set in managed storage

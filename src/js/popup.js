@@ -318,6 +318,36 @@
         // window.close();
       });
     document
+      .getElementById('suspendAllWindows')
+      .addEventListener('click', function(e) {
+        tgs.suspendAllTabsInAllWindows(false);
+        window.close();
+      });
+    document
+      .getElementById('suspendAllWindows')
+      .addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          tgs.suspendAllTabsInAllWindows(false);
+          window.close();
+        }
+      });
+    document
+      .getElementById('unsuspendAllWindows')
+      .addEventListener('click', function(e) {
+        tgs.unsuspendAllTabsInAllWindows();
+        window.close();
+      });
+    document
+      .getElementById('unsuspendAllWindows')
+      .addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          tgs.unsuspendAllTabsInAllWindows();
+          window.close();
+        }
+      });
+    document
       .getElementById('settingsLink')
       .addEventListener('click', function(e) {
         chrome.tabs.create({

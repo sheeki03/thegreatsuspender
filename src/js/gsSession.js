@@ -745,53 +745,7 @@ var gsSession = (function() {
     }
   }
 
-  async function updateSessionMetrics(reset) {
-    reset = reset || false;
-
-    const tabs = await gsChrome.tabsQuery();
-    let curSuspendedTabCount = 0;
-    for (let tab of tabs) {
-      if (gsUtils.isSuspendedTab(tab)) {
-        curSuspendedTabCount += 1;
-      }
-    }
-    let sessionMetrics;
-    if (reset) {
-      gsUtils.log('gsSession', 'Resetting session metrics');
-    } else {
-      sessionMetrics = gsStorage.fetchSessionMetrics();
-    }
-
-    // If no session metrics exist then create a new one
-    if (!sessionMetrics || !sessionMetrics[gsStorage.SM_TIMESTAMP]) {
-      sessionMetrics = createNewSessionMetrics(
-        curSuspendedTabCount,
-        tabs.length
-      );
-      gsStorage.setSessionMetrics(sessionMetrics);
-      gsUtils.log('gsSession', 'Created new session metrics', sessionMetrics);
-      return;
-    }
-
-    // Else update metrics (if new max reached)
-    const lastSuspendedTabCount =
-      sessionMetrics[gsStorage.SM_SUSPENDED_TAB_COUNT];
-    if (lastSuspendedTabCount < curSuspendedTabCount) {
-      sessionMetrics[gsStorage.SM_SUSPENDED_TAB_COUNT] = curSuspendedTabCount;
-      sessionMetrics[gsStorage.SM_TOTAL_TAB_COUNT] = tabs.length;
-      gsStorage.setSessionMetrics(sessionMetrics);
-      gsUtils.log('gsSession', 'Updated session metrics', sessionMetrics);
-    }
-  }
-
-  function createNewSessionMetrics(suspendedTabCount, totalTabCount) {
-    const sessionMetrics = {
-      [gsStorage.SM_TIMESTAMP]: Date.now(),
-      [gsStorage.SM_SUSPENDED_TAB_COUNT]: suspendedTabCount,
-      [gsStorage.SM_TOTAL_TAB_COUNT]: totalTabCount,
-    };
-    return sessionMetrics;
-  }
+  // Session metrics tracking functions removed for privacy
 
   return {
     initAsPromised,
@@ -812,6 +766,5 @@ var gsSession = (function() {
     restoreSessionWindow,
     prepareForUpdate,
     getUpdateType,
-    updateSessionMetrics,
   };
 })();
