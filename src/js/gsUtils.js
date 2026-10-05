@@ -1,4 +1,4 @@
-/*global chrome, localStorage, gsStorage, gsChrome, gsMessages, gsSession, gsTabSuspendManager, gsTabDiscardManager, gsSuspendedTab, gsFavicon, tgs */
+/*global gsBrowser, localStorage, gsStorage, gsChrome, gsMessages, gsSession, gsTabSuspendManager, gsTabDiscardManager, gsSuspendedTab, gsFavicon, tgs, gsWorkbench */
 'use strict';
 
 var debugInfo = false;
@@ -169,24 +169,35 @@ var gsUtils = {
   isInternalTab: function(tab) {
     const url = tab.url || tab.pendingUrl;
     var isLocalExtensionPage =
-      url.indexOf('chrome-extension://' + chrome.runtime.id) === 0;
+      url.indexOf('chrome-extension://' + gsBrowser.runtime.id) === 0;
     return isLocalExtensionPage && !gsUtils.isSuspendedTab(tab);
   },
 
+  getSuspensionPolicy: function(tab) {
+    if (!tab.incognito && typeof gsWorkbench !== 'undefined' && gsWorkbench.isReady()) {
+      return gsWorkbench.getPolicy(tab.id);
+    }
+    return {
+      suspendMinutes: gsStorage.getOption(gsStorage.SUSPEND_TIME),
+      ignorePinned: gsStorage.getOption(gsStorage.IGNORE_PINNED),
+      ignoreAudio: gsStorage.getOption(gsStorage.IGNORE_AUDIO),
+      ignoreForms: gsStorage.getOption(gsStorage.IGNORE_FORMS),
+      ignoreActive: gsStorage.getOption(gsStorage.IGNORE_ACTIVE_TABS),
+    };
+  },
+
   isProtectedPinnedTab: function(tab) {
-    var dontSuspendPinned = gsStorage.getOption(gsStorage.IGNORE_PINNED);
+    var dontSuspendPinned = gsUtils.getSuspensionPolicy(tab).ignorePinned;
     return dontSuspendPinned && tab.pinned;
   },
 
   isProtectedAudibleTab: function(tab) {
-    var dontSuspendAudible = gsStorage.getOption(gsStorage.IGNORE_AUDIO);
+    var dontSuspendAudible = gsUtils.getSuspensionPolicy(tab).ignoreAudio;
     return dontSuspendAudible && tab.audible;
   },
 
   isProtectedActiveTab: function(tab) {
-    var dontSuspendActiveTabs = gsStorage.getOption(
-      gsStorage.IGNORE_ACTIVE_TABS
-    );
+    var dontSuspendActiveTabs = gsUtils.getSuspensionPolicy(tab).ignoreActive;
     return (
       tgs.isCurrentFocusedTab(tab) || (dontSuspendActiveTabs && tab.active)
     );
@@ -213,7 +224,7 @@ var gsUtils = {
     } else if (looseMatching) {
       return url.indexOf('suspended.html') > 0;
     } else {
-      return url.indexOf(chrome.extension.getURL('suspended.html')) === 0;
+      return url.indexOf(gsBrowser.runtime.getURL('suspended.html')) === 0;
     }
   },
 
@@ -230,7 +241,7 @@ var gsUtils = {
   removeTabsByUrlAsPromised: function(url) {
     return new Promise(async resolve => {
       const tabs = await gsChrome.tabsQuery({ url });
-      chrome.tabs.remove(tabs.map(o => o.id), () => {
+      gsBrowser.tabs.remove(tabs.map(o => o.id), () => {
         resolve();
       });
     });
@@ -383,7 +394,7 @@ var gsUtils = {
 
   localiseHtml: function(parentEl) {
     var replaceTagFunc = function(match, p1) {
-      return p1 ? chrome.i18n.getMessage(p1) : '';
+      return p1 ? gsBrowser.i18n.getMessage(p1) : '';
     };
     for (let el of parentEl.getElementsByTagName('*')) {
       if (el.hasAttribute('data-i18n')) {
@@ -424,7 +435,7 @@ var gsUtils = {
       'uri=' +
       url;
 
-    return chrome.extension.getURL('suspended.html' + args);
+    return gsBrowser.runtime.getURL('suspended.html' + args);
   },
 
   getRootUrl: function(url, includePath, includeScheme) {
@@ -593,7 +604,7 @@ var gsUtils = {
 
   getAllExpiredTabs: function(callback) {
     var expiredTabs = [];
-    chrome.tabs.query({}, tabs => {
+    gsBrowser.tabs.query({}, tabs => {
       for (const tab of tabs) {
         const timerDetails = tgs.getTabStatePropForTabId(
           tab.id,
@@ -616,7 +627,7 @@ var gsUtils = {
     oldValueBySettingKey,
     newValueBySettingKey
   ) {
-    chrome.tabs.query({}, function(tabs) {
+    gsBrowser.tabs.query({}, function(tabs) {
       tabs.forEach(function(tab) {
         if (gsUtils.isSpecialTab(tab)) {
           return;
@@ -640,31 +651,7 @@ var gsUtils = {
             gsStorage.SCREEN_CAPTURE
           );
           if (updateTheme || updatePreviewMode) {
-            const suspendedView = tgs.getInternalViewByTabId(tab.id);
-            if (suspendedView) {
-              if (updateTheme) {
-                const theme = gsStorage.getOption(gsStorage.THEME);
-                gsFavicon.getFaviconMetaData(tab).then(faviconMeta => {
-                  const isLowContrastFavicon = faviconMeta.isDark || false;
-                  gsSuspendedTab.updateTheme(
-                    suspendedView,
-                    tab,
-                    theme,
-                    isLowContrastFavicon
-                  );
-                });
-              }
-              if (updatePreviewMode) {
-                const previewMode = gsStorage.getOption(
-                  gsStorage.SCREEN_CAPTURE
-                );
-                gsSuspendedTab.updatePreviewMode(
-                  suspendedView,
-                  tab,
-                  previewMode
-                ); // async. unhandled promise.
-              }
-            }
+            gsSuspendedTab.notify(tab.id, 'legacy.suspended.changed');
           }
 
           //if discardAfterSuspend has changed then updated discarded tabs
@@ -697,20 +684,12 @@ var gsUtils = {
         //update suspend timers
         const updateSuspendTime =
           changedSettingKeys.includes(gsStorage.SUSPEND_TIME) ||
-          (changedSettingKeys.includes(gsStorage.IGNORE_ACTIVE_TABS) &&
-            tab.active) ||
-          (changedSettingKeys.includes(gsStorage.IGNORE_PINNED) &&
-            !gsStorage.getOption(gsStorage.IGNORE_PINNED) &&
-            tab.pinned) ||
-          (changedSettingKeys.includes(gsStorage.IGNORE_AUDIO) &&
-            !gsStorage.getOption(gsStorage.IGNORE_AUDIO) &&
-            tab.audible) ||
-          (changedSettingKeys.includes(gsStorage.IGNORE_WHEN_OFFLINE) &&
-            !gsStorage.getOption(gsStorage.IGNORE_WHEN_OFFLINE) &&
-            !navigator.onLine) ||
-          (changedSettingKeys.includes(gsStorage.IGNORE_WHEN_CHARGING) &&
-            !gsStorage.getOption(gsStorage.IGNORE_WHEN_CHARGING) &&
-            tgs.isCharging()) ||
+          changedSettingKeys.includes(gsStorage.IGNORE_ACTIVE_TABS) ||
+          changedSettingKeys.includes(gsStorage.IGNORE_PINNED) ||
+          changedSettingKeys.includes(gsStorage.IGNORE_AUDIO) ||
+          changedSettingKeys.includes(gsStorage.IGNORE_FORMS) ||
+          changedSettingKeys.includes(gsStorage.IGNORE_WHEN_OFFLINE) ||
+          changedSettingKeys.includes(gsStorage.IGNORE_WHEN_CHARGING) ||
           (changedSettingKeys.includes(gsStorage.WHITELIST) &&
             (gsUtils.checkSpecificWhiteList(
               tab.url,
@@ -733,18 +712,6 @@ var gsUtils = {
           //note: this may cause the tab to suspend
         }
 
-        //if we aren't resetting the timer on this tab, then check to make sure it does not have an expired timer
-        //should always be caught by tests above, but we'll check all tabs anyway just in case
-        // if (!updateSuspendTime) {
-        //     gsMessages.sendRequestInfoToContentScript(tab.id, function (err, tabInfo) { // unhandled error
-        //         tgs.calculateTabStatus(tab, tabInfo, function (tabStatus) {
-        //             if (tabStatus === STATUS_NORMAL && tabInfo && tabInfo.timerUp && (new Date(tabInfo.timerUp)) < new Date()) {
-        //                 gsUtils.error(tab.id, 'Tab has an expired timer!', tabInfo);
-        //                 gsMessages.sendUpdateToContentScriptOfTab(tab, true, false); // async. unhandled error
-        //             }
-        //         });
-        //     });
-        // }
       });
     });
 

@@ -1,0 +1,58 @@
+.legacy-page button.groupLink,
+.legacy-page button.sessionLink,
+.legacy-page button.sessionIcon,
+.legacy-page button.itemHover,
+.legacy-page button.legacy-text-button {
+  appearance: none;
+  border: 0;
+  background: none;
+  font: inherit;
+  padding: 2px 0;
+  color: #245cb8;
+  cursor: pointer;
+  text-align: start;
+}
+.legacy-page button.groupLink { font-size: 12px; margin-inline-start: 10px; }
+.legacy-page button.sessionLink { color: inherit; }
+.legacy-page button:disabled { cursor: wait; opacity: .6; }
+.legacy-page .mainContent { max-width: calc(100vw - 32px); }
+.legacy-page .splash:not(.welcome-message) { width: min(900px, calc(100vw - 32px)); }
+.legacy-page .content { min-width: 0; }
+.legacy-page button.sessionLink { max-width: 100%; overflow-wrap: anywhere; }
+.legacy-page :focus-visible { outline: 2px solid #245cb8; outline-offset: 3px; }
+.legacy-page .sessionContainer { white-space: normal; }
+.legacy-page .sessionContainer .groupLink,
+.legacy-page .tabContainer .itemHover { visibility: visible; }
+.legacy-page .tabContainer { display: flex; align-items: center; gap: 5px; }
+.legacy-page .tabContainer .removeLink { margin-inline-start: 0; font-size: 12px; flex-shrink: 0; }
+.legacy-page .tabContainer .historyLink { padding: 0; min-width: 0; }
+.legacy-page .tabContainer img { flex-shrink: 0; }
+.legacy-status { margin: 0 0 16px; padding: 10px 12px; color: #142339; background: #f4f6f8; border: 1px solid #dce3eb; overflow-wrap: anywhere; }
+.legacy-status.is-error { color: #902126; }
+.legacy-status.is-success { color: #176445; }
+.legacy-page.suspended-page .legacy-status { position: fixed; bottom: 16px; inset-inline: 16px; z-index: 102; max-width: 70ch; margin: 0 auto; }
+.legacy-page.suspended-page.dark .legacy-status { background: #202a37; color: #e4ecf7; border-color: #536274; }
+.legacy-page #gsPreviewContainer[hidden] { display: none; }
+.legacy-page #suspendedMsg[hidden] { display: none; }
+.legacy-page .preview-restore { display: block; width: 100%; border: 0; padding: 0; background: none; cursor: pointer; }
+.legacy-page .suspended-restore { display: block; border: 0; padding: 0; color: inherit; background: none; font: inherit; cursor: pointer; }
+.legacy-page .suspended-restore > span,
+.legacy-page .reasonMsg { display: block; }
+.legacy-page .watermark { border: 0; background: none; font: inherit; font-weight: bold; }
+.legacy-page .session-count { font-size: 12px; color: #607082; white-space: nowrap; }
+.legacy-page #gsProfiler { width: 100%; }
+.legacy-page #gsProfiler td { overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .legacy-page .mainContent { width: auto; margin-inline: 16px; grid-template-columns: minmax(0, 1fr); grid-template-areas: 'h' 'n' 'm'; gap: 24px; }
+  .legacy-page .contentNav { width: auto; border: 0; padding: 0; }
+  .legacy-page .content { margin-inline-start: 0; padding-inline: 0; }
+  .legacy-page .contentNav ul { display: flex; flex-wrap: wrap; gap: 12px; }
+  .legacy-page .splash { grid-template-columns: minmax(0, 1fr); padding: 24px 16px; }
+  .legacy-page .splash .suspendy-guy { max-width: 120px; }
+  .legacy-page .gsTopBar { padding: 20px 16px; }
+  .legacy-page .gsTopBarTitle { font-size: 18px; }
+  .legacy-page .sessionContents { margin-inline-start: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .legacy-page *, .legacy-page *::before, .legacy-page *::after { animation: none !important; transition: none !important; }
+}

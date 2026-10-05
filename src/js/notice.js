@@ -1,29 +1,11 @@
-/*global chrome, tgs, gsStorage, gsUtils */
-(function(global) {
+/* global workbenchClient, legacyUi */
+(function() {
   'use strict';
-
-  try {
-    chrome.extension.getBackgroundPage().tgs.setViewGlobals(global);
-  } catch (e) {
-    window.setTimeout(() => window.location.reload(), 1000);
-    return;
-  }
-
-  gsUtils.documentReadyAndLocalisedAsPromsied(document).then(function() {
-    var notice = tgs.requestNotice();
-    if (
-      notice &&
-      notice.hasOwnProperty('text') &&
-      notice.hasOwnProperty('version')
-    ) {
-      var noticeContentEl = document.getElementById('gsNotice');
-      noticeContentEl.innerHTML = notice.text;
-      //update local notice version
-      gsStorage.setNoticeVersion(notice.version);
-    }
-
-    //clear notice (to prevent it showing again)
-    tgs.clearNotice();
+  legacyUi.start(async function() {
+    var notice = await workbenchClient.request('legacy.notice.get');
+    var element = document.getElementById('gsNotice');
+    if (!notice) { element.textContent = 'There are no new notices.'; return; }
+    legacyUi.appendNotice(element, notice.text);
+    await workbenchClient.request('legacy.notice.dismiss', { version: notice.version });
   });
-
-})(this);
+})();

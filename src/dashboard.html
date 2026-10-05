@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tab workbench · The Great Suspender</title>
+  <link rel="icon" href="img/ic_suspendy_32x32.png">
+  <link rel="stylesheet" href="css/workbench.css">
+  <script defer src="js/workbenchClient.js"></script>
+  <script defer src="js/dashboard.js"></script>
+</head>
+<body>
+  <header class="app-header">
+    <a class="brand" href="dashboard.html">
+      <img src="img/ic_suspendy_48x48.png" alt="" width="35" height="35">
+      <span class="brand-name">The Great Suspender<small>Tab workbench</small></span>
+    </a>
+    <div class="header-links">
+      <button type="button" id="undo-button" disabled>Undo last action</button>
+      <a class="button-link" href="options.html">Settings</a>
+    </div>
+  </header>
+  <div class="app-shell" id="app-shell">
+    <aside class="rail" aria-label="Workbench navigation">
+      <nav id="main-navigation" aria-label="Views"></nav>
+      <div class="rail-section">
+        <h2>Workspaces</h2>
+        <nav id="workspace-navigation" aria-label="Workspaces"></nav>
+      </div>
+      <div class="rail-section">
+        <h2>Legacy tools</h2>
+        <nav aria-label="Legacy tools">
+          <a class="nav-link" href="history.html">Sessions / import / export</a>
+          <a class="nav-link" href="recovery.html">Recovery</a>
+          <a class="nav-link" href="shortcuts.html">Keyboard shortcuts</a>
+          <a class="nav-link" href="about.html">About &amp; support</a>
+        </nav>
+      </div>
+      <details class="keyboard-help">
+        <summary>Keyboard help</summary>
+        <p><kbd>/</kbd> or <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>K</kbd> searches. Arrow keys move between tab rows. <kbd>Home</kbd>/<kbd>End</kbd> jump. <kbd>Space</kbd> selects a row. <kbd>Enter</kbd> inspects it. <kbd>Esc</kbd> cancels a confirmation and returns focus.</p>
+      </details>
+    </aside>
+    <main class="main-pane" id="main-pane">
+      <div class="view-heading">
+        <div><h1 id="view-title">Tabs</h1><p class="muted" id="view-description">Across your browser, without losing your place.</p></div>
+        <button type="button" id="refresh-button">Refresh</button>
+      </div>
+      <div class="notice" id="page-notice" role="status" aria-live="polite" hidden></div>
+      <div class="operation-result" id="operation-outcome" role="status" aria-live="polite" hidden></div>
+      <div class="filters" id="filters">
+        <label class="search-field"><span class="sr-only">Search title, URL, site, group or status</span><input type="search" id="tab-search" placeholder="Search title, URL, site or group" autocomplete="off"><span class="search-key">/</span></label>
+        <label><span class="sr-only">Tab status</span><select id="status-filter"><option value="all">All statuses</option><option value="awake">Awake</option><option value="suspended">Suspended</option><option value="discarded">Discarded</option><option value="loading">Loading</option><option value="protected">Protected</option></select></label>
+        <label><span class="sr-only">Browser window</span><select id="window-filter"><option value="all">All windows</option></select></label>
+      </div>
+      <div id="view-content" aria-busy="true"><div class="loading-state"><h2>Loading your tabs</h2><p>Waiting for the local extension to finish initializing.</p></div></div>
+    </main>
+    <aside class="inspector" id="inspector" aria-label="Selection and actions">
+      <h2>Selection</h2>
+      <p class="muted">Select a tab to see its details and safe actions.</p>
+    </aside>
+  </div>
+</body>
+</html>

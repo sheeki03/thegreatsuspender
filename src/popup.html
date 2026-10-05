@@ -1,65 +1,52 @@
 <!doctype html>
-<html>
-
+<html lang="en">
 <head>
-	<link type="text/css" href="css/popup.css" rel="stylesheet">
-	<script type="text/javascript" src="js/popup.js"></script>
-
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The Great Suspender</title>
+  <link rel="stylesheet" href="css/workbench.css">
+  <link rel="stylesheet" href="css/popup.css">
+  <script defer src="js/workbenchClient.js"></script>
+  <script defer src="js/legacyUi.js"></script>
+  <script defer src="js/popup.js"></script>
 </head>
-
-<body>
-	<div id="header">
-		<span id="statusDetail"></span>
-	</div>
-	<div id="popupContent">
-		<div class="group" id="optsCurrent">
-			<div class="menuOption" id="unsuspendOne">
-				<span class="optionText" data-i18n="__MSG_html_popup_unsuspend_tab__"></span>
-			</div>
-			<div class="menuOption" id="suspendOne">
-				<span class="optionText" data-i18n="__MSG_html_popup_suspend_tab__"></span>
-			</div>
-			<div class="menuOption" id="whitelistPage">
-				<span class="optionText" data-i18n="__MSG_html_popup_never_suspend_page__"></span>
-			</div>
-			<div class="menuOption" id="whitelistDomain">
-				<span class="optionText" data-i18n="__MSG_html_popup_never_suspend_domain__"></span>
-			</div>
-		</div>
-
-		<div class="group" id="optsSelected">
-			<div class="menuOption" id="suspendSelected">
-				<span class="optionText" data-i18n="__MSG_html_popup_suspend_selected_tabs__"></span>
-			</div>
-			<div class="menuOption" href="#" id="unsuspendSelected">
-				<span class="optionText" data-i18n="__MSG_html_popup_unsuspend_selected_tabs__"></span>
-			</div>
-		</div>
-
-		<div class="group" id="optsAll">
-			<div class="menuOption" id="suspendAll">
-				<span class="optionText" data-i18n="__MSG_html_popup_suspend_other_tabs__"></span>
-			</div>
-			<div class="menuOption" href="#" id="unsuspendAll">
-				<span class="optionText" data-i18n="__MSG_html_popup_unsuspend_all_tabs__"></span>
-			</div>
-		</div>
-
-		<div class="group" id="optsGlobal">
-			<div class="menuOption" id="suspendAllWindows" role="button" tabindex="0" aria-label="Suspend all tabs across all windows">
-				<span class="optionText" data-i18n="__MSG_html_popup_suspend_all_windows__"></span>
-			</div>
-			<div class="menuOption" href="#" id="unsuspendAllWindows" role="button" tabindex="0" aria-label="Unsuspend all tabs across all windows">
-				<span class="optionText" data-i18n="__MSG_html_popup_unsuspend_all_windows__"></span>
-			</div>
-		</div>
-
-		<div class="group">
-			<div class="menuOption" id="settingsLink">
-				<span class="optionText" data-i18n="__MSG_html_popup_settings__"></span>
-			</div>
-		</div>
-	</div>
+<body class="popup-page">
+  <header class="popup-header"><a class="brand" href="dashboard.html" id="brand-link"><img src="img/ic_suspendy_48x48.png" alt="" width="32" height="32"><span class="brand-name">The Great Suspender<small>Keep your place. Let tabs rest.</small></span></a></header>
+  <main class="popup-main">
+    <form id="popup-search-form" class="popup-search"><label class="sr-only" for="popup-search">Search all tabs in the workbench</label><input type="search" id="popup-search" placeholder="Search all tabs in workbench" autocomplete="off"><button type="submit" aria-label="Search tabs">Search</button></form>
+    <div id="popup-notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <p id="popup-private-info" class="muted" hidden>Private tabs use the original suspension, restoration and never-suspend controls. Workspaces, undo, snooze, meeting mode and activity tracking are unavailable here; private tab metadata is not stored.</p>
+    <section class="popup-section current-section" aria-labelledby="current-title">
+      <div class="popup-section-heading"><h1 id="current-title">Current tab</h1><div class="button-row"><span class="row-state" id="current-state">Loading</span><button type="button" class="quiet" id="popup-refresh">Refresh</button></div></div>
+      <p class="current-tab-title" id="current-tab-title">Loading your current tab…</p>
+      <p class="current-tab-url" id="current-tab-url"></p>
+      <p class="muted" id="current-protection">Waiting for the local extension to initialize.</p>
+      <div class="button-row"><button type="button" class="primary" id="current-suspend" disabled>Preview suspend</button><button type="button" id="current-restore" disabled>Restore tab</button></div>
+      <details id="current-controls"><summary>Keep this tab awake</summary>
+        <label class="field"><span>Snooze automatic suspension</span><select id="popup-snooze"><option value="30">30 minutes</option><option value="60">1 hour</option><option value="240">4 hours</option><option value="tomorrow">Tomorrow at 09:00 (local)</option><option value="restart">Until browser restart</option></select></label>
+        <div class="button-row"><button type="button" id="apply-snooze">Snooze</button><button type="button" id="end-snooze">End snooze</button></div>
+        <label class="field"><span>Meeting / presentation mode</span><select id="popup-protection"><option value="meeting">Meeting</option><option value="presentation">Presentation</option></select></label>
+        <div class="button-row"><button type="button" id="apply-protection">Protect for 1 hour</button><button type="button" id="end-protection">End protection</button></div>
+        <div class="button-row exclusions"><button type="button" id="whitelist-page">Never suspend page</button><button type="button" id="whitelist-domain">Never suspend site</button><button type="button" id="remove-whitelist">Remove matching exclusions</button></div>
+      </details>
+    </section>
+    <section class="popup-section" aria-labelledby="bulk-heading">
+      <h2 id="bulk-heading">Browser actions</h2>
+      <label class="field"><span>Apply to</span><select id="popup-scope"><option value="selected">Highlighted browser tabs</option><option value="window">Other tabs in this window</option><option value="all">All windows</option></select></label>
+      <p class="muted" id="scope-count">Loading tabs…</p>
+      <div class="button-row"><button type="button" id="bulk-suspend" disabled>Preview suspend</button><button type="button" id="bulk-restore" disabled>Preview restore</button></div>
+    </section>
+    <section class="popup-section" aria-labelledby="workspace-heading">
+      <h2 id="workspace-heading">Workspace</h2>
+      <label class="field"><span>Switch to</span><select id="popup-workspace"><option value="">Loading workspaces…</option></select></label>
+      <div class="button-row"><button type="button" id="switch-workspace" disabled>Preview switch</button><button type="button" id="manage-workspaces">Manage workspaces</button></div>
+    </section>
+    <section class="preview-panel" id="popup-preview" aria-label="Action preview" hidden></section>
+    <div class="operation-result" id="popup-result" role="status" aria-live="polite" hidden></div>
+    <button type="button" id="popup-undo" disabled>Undo last action</button>
+    <p class="undo-help">Undo restores URLs, order, groups and suspension state—not unsaved application state.</p>
+    <p class="popup-keyboard-help"><kbd>/</kbd> or <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>K</kbd> searches. <kbd>Tab</kbd>/<kbd>Shift</kbd> + <kbd>Tab</kbd> moves between controls; <kbd>Esc</kbd> cancels a preview.</p>
+  </main>
+  <footer class="popup-footer"><button type="button" class="primary" id="open-dashboard">Open workbench</button><button type="button" id="open-settings">Settings</button></footer>
 </body>
-
 </html>

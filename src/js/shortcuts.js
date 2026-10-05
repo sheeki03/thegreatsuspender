@@ -1,49 +1,14 @@
-/*global chrome, gsUtils */
-(function(global) {
+/* global chrome, workbenchClient, legacyUi */
+(function() {
   'use strict';
-
-  try {
-    chrome.extension.getBackgroundPage().tgs.setViewGlobals(global);
-  } catch (e) {
-    window.setTimeout(() => window.location.reload(), 1000);
-    return;
-  }
-
-  gsUtils.documentReadyAndLocalisedAsPromsied(document).then(function() {
-    var shortcutsEl = document.getElementById('keyboardShortcuts');
-    var configureShortcutsEl = document.getElementById('configureShortcuts');
-
-    var notSetMessage = chrome.i18n.getMessage('js_shortcuts_not_set');
-    var groupingKeys = [
-      '2-toggle-temp-whitelist-tab',
-      '2b-unsuspend-selected-tabs',
-      '4-unsuspend-active-window',
-    ];
-
-    //populate keyboard shortcuts
-    chrome.commands.getAll(commands => {
-      commands.forEach(command => {
-        if (command.name !== '_execute_browser_action') {
-          const shortcut =
-            command.shortcut !== ''
-              ? gsUtils.formatHotkeyString(command.shortcut)
-              : '(' + notSetMessage + ')';
-          var addMarginBottom = groupingKeys.includes(command.name);
-          shortcutsEl.innerHTML += `<div ${
-            addMarginBottom ? ' class="bottomMargin"' : ''
-          }>${command.description}</div>
-            <div class="${
-              command.shortcut ? 'hotkeyCommand' : 'lesserText'
-            }">${shortcut}</div>`;
-        }
-      });
+  var C = workbenchClient;
+  legacyUi.start(async function() {
+    var shortcuts = document.getElementById('keyboardShortcuts');
+    var result = await C.request('legacy.shortcuts.get');
+    var grouping = ['2-toggle-temp-whitelist-tab', '2b-unsuspend-selected-tabs', '4-unsuspend-active-window'];
+    result.commands.filter(function(command) { return command.name !== '_execute_action'; }).forEach(function(command) {
+      shortcuts.append(C.node('div', { class: grouping.includes(command.name) ? 'bottomMargin' : '', text: command.description }), C.node('div', { class: command.shortcut ? 'hotkeyCommand' : 'lesserText', text: command.shortcut || '(' + chrome.i18n.getMessage('js_shortcuts_not_set') + ')' }));
     });
-
-    //listener for configureShortcuts
-    configureShortcutsEl.onclick = function(e) {
-      chrome.tabs.update({ url: 'chrome://extensions/shortcuts' });
-    };
+    legacyUi.bind(document.getElementById('configureShortcuts'), function() { return C.api(chrome.tabs, 'create', [{ url: 'chrome://extensions/shortcuts' }]); });
   });
-
-
-})(this);
+})();

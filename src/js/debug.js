@@ -1,148 +1,35 @@
-/*global chrome, tgs, gsUtils, gsFavicon, gsStorage, gsChrome */
-(function(global) {
+/* global chrome, workbenchClient, legacyUi */
+(function() {
   'use strict';
-
-  try {
-    chrome.extension.getBackgroundPage().tgs.setViewGlobals(global);
-  } catch (e) {
-    window.setTimeout(() => window.location.reload(), 1000);
-    return;
+  var C = workbenchClient, data;
+  var flags = { toggleDebugInfo: 'debugInfo', toggleDebugError: 'debugError', toggleDiscardInPlaceOfSuspend: 'discardInPlaceOfSuspend', toggleUseAlternateScreenCaptureLib: 'useAlternateScreenCaptureLib' };
+  function showFlags() {
+    Object.keys(flags).forEach(function(id) { var value = !!data[flags[id]], element = document.getElementById(id); element.textContent = String(value); element.setAttribute('aria-pressed', String(value)); });
   }
-
-  var currentTabs = {};
-
-  function generateTabInfo(info) {
-    // console.log(info.tabId, info);
-    var timerStr =
-      info && info.timerUp && info && info.timerUp !== '-'
-        ? new Date(info.timerUp).toLocaleString()
-        : '-';
-    var html = '',
-      windowId = info && info.windowId ? info.windowId : '?',
-      tabId = info && info.tabId ? info.tabId : '?',
-      tabIndex = info && info.tab ? info.tab.index : '?',
-      favicon = info && info.tab ? info.tab.favIconUrl : '',
-      tabTitle = info && info.tab ? gsUtils.htmlEncode(info.tab.title) : '?',
-      tabTimer = timerStr,
-      tabStatus = info ? info.status : '?';
-
-    favicon =
-      favicon && favicon.indexOf('data') === 0
-        ? favicon
-        : gsFavicon.generateChromeFavIconUrlFromUrl(info.tab.url);
-
-    html += '<tr>';
-    html += '<td>' + windowId + '</td>';
-    html += '<td>' + tabId + '</td>';
-    html += '<td>' + tabIndex + '</td>';
-    html += '<td><img src=' + favicon + '></td>';
-    html += '<td>' + tabTitle + '</td>';
-    html += '<td>' + tabTimer + '</td>';
-    html += '<td>' + tabStatus + '</td>';
-    html += '</tr>';
-
-    return html;
+  async function refresh() {
+    data = await C.request('legacy.debug.get');
+    showFlags();
+    var body = document.getElementById('gsProfilerBody');
+    body.replaceChildren();
+    data.tabs.forEach(function(info) {
+      var tab = info.tab || {};
+      var image = C.node('img', { src: legacyUi.imageSource(tab.favIconUrl) || legacyUi.favicon(tab.originalUrl || tab.url), width: '16', height: '16', alt: '' });
+      var timer = info.timerUp && info.timerUp !== '-' ? new Date(info.timerUp).toLocaleString() : '—';
+      body.appendChild(C.node('tr', {}, [C.node('td', { text: info.windowId }), C.node('td', { text: info.tabId }), C.node('td', { text: tab.index }), C.node('td', {}, [image]), C.node('td', { text: tab.title || tab.url }), C.node('td', { text: timer }), C.node('td', { text: info.status })]));
+    });
   }
-
-  async function fetchInfo() {
-    const tabs = await gsChrome.tabsQuery();
-    const debugInfoPromises = [];
-    for (const [i, curTab] of tabs.entries()) {
-      currentTabs[tabs[i].id] = tabs[i];
-      debugInfoPromises.push(
-        new Promise(r =>
-          tgs.getDebugInfo(curTab.id, o => {
-            o.tab = curTab;
-            r(o);
-          })
-        )
-      );
-    }
-    const debugInfos = await Promise.all(debugInfoPromises);
-    for (const debugInfo of debugInfos) {
-      var html,
-        tableEl = document.getElementById('gsProfilerBody');
-      html = generateTabInfo(debugInfo);
-      tableEl.innerHTML = tableEl.innerHTML + html;
-    }
-  }
-
-  function addFlagHtml(elementId, getterFn, setterFn) {
-    document.getElementById(elementId).innerHTML = getterFn();
-    document.getElementById(elementId).onclick = function(e) {
-      const newVal = !getterFn();
-      setterFn(newVal);
-      document.getElementById(elementId).innerHTML = newVal;
-    };
-  }
-
-  gsUtils.documentReadyAndLocalisedAsPromsied(document).then(async function() {
-    await fetchInfo();
-    addFlagHtml(
-      'toggleDebugInfo',
-      () => gsUtils.isDebugInfo(),
-      newVal => gsUtils.setDebugInfo(newVal)
-    );
-    addFlagHtml(
-      'toggleDebugError',
-      () => gsUtils.isDebugError(),
-      newVal => gsUtils.setDebugError(newVal)
-    );
-    addFlagHtml(
-      'toggleDiscardInPlaceOfSuspend',
-      () => gsStorage.getOption(gsStorage.DISCARD_IN_PLACE_OF_SUSPEND),
-      newVal => {
-        gsStorage.setOptionAndSync(
-          gsStorage.DISCARD_IN_PLACE_OF_SUSPEND,
-          newVal
-        );
-      }
-    );
-    addFlagHtml(
-      'toggleUseAlternateScreenCaptureLib',
-      () => gsStorage.getOption(gsStorage.USE_ALT_SCREEN_CAPTURE_LIB),
-      newVal => {
-        gsStorage.setOptionAndSync(
-          gsStorage.USE_ALT_SCREEN_CAPTURE_LIB,
-          newVal
-        );
-      }
-    );
-    document.getElementById('claimSuspendedTabs').onclick = async function(e) {
-      const tabs = await gsChrome.tabsQuery();
-      for (const tab of tabs) {
-        if (
-          gsUtils.isSuspendedTab(tab, true) &&
-          tab.url.indexOf(chrome.runtime.id) < 0
-        ) {
-          const newUrl = tab.url.replace(
-            gsUtils.getRootUrl(tab.url),
-            chrome.runtime.id
-          );
-          await gsChrome.tabsUpdate(tab.id, { url: newUrl });
-        }
-      }
-    };
-
-    var extensionsUrl = `chrome://extensions/?id=${chrome.runtime.id}`;
-    document
-      .getElementById('backgroundPage')
-      .setAttribute('href', extensionsUrl);
-    document.getElementById('backgroundPage').onclick = function() {
-      chrome.tabs.create({ url: extensionsUrl });
-    };
-
-    /*
-        chrome.processes.onUpdatedWithMemory.addListener(function (processes) {
-            chrome.tabs.query({}, function (tabs) {
-                var html = '';
-                html += generateMemStats(processes);
-                html += '<br />';
-                html += generateTabStats(tabs);
-                document.getElementById('gsProfiler').innerHTML = html;
-            });
-        });
-        */
+  legacyUi.start(async function() {
+    Object.keys(flags).forEach(function(id) {
+      legacyUi.bind(document.getElementById(id), async function() {
+        var payload = {}; payload[flags[id]] = !data[flags[id]];
+        Object.assign(data, await C.request('legacy.debug.update', payload));
+        showFlags(); legacyUi.status('Debug preference updated.', 'success');
+      });
+    });
+    legacyUi.bind(document.getElementById('claimSuspendedTabs'), async function() { var result = await C.request('legacy.debug.claim'); legacyUi.status(C.resultText(result, 'Suspended tabs claimed.'), 'success'); await refresh(); });
+    var url = 'chrome://extensions/?id=' + chrome.runtime.id;
+    document.getElementById('backgroundPage').href = url;
+    legacyUi.bind(document.getElementById('backgroundPage'), function() { return C.api(chrome.tabs, 'create', [{ url: url }]); });
+    await refresh();
   });
-
-})(this);
+})();

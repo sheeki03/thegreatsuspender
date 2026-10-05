@@ -1,12 +1,12 @@
-/*global chrome, gsUtils */
+/*global gsBrowser, gsUtils */
 'use strict';
 // eslint-disable-next-line no-unused-vars
 var gsChrome = {
   cookiesGetAll: function() {
     return new Promise(resolve => {
-      chrome.cookies.getAll({}, cookies => {
-        if (chrome.runtime.lastError) {
-          gsUtils.warning('chromeCookies', chrome.runtime.lastError);
+      gsBrowser.cookies.getAll({}, cookies => {
+        if (gsBrowser.runtime.lastError) {
+          gsUtils.warning('chromeCookies', gsBrowser.runtime.lastError);
           cookies = [];
         }
         resolve(cookies);
@@ -20,9 +20,9 @@ var gsChrome = {
         resolve(null);
         return;
       }
-      chrome.cookies.remove({ url, name }, details => {
-        if (chrome.runtime.lastError) {
-          gsUtils.warning('chromeCookies', chrome.runtime.lastError);
+      gsBrowser.cookies.remove({ url, name }, details => {
+        if (gsBrowser.runtime.lastError) {
+          gsUtils.warning('chromeCookies', gsBrowser.runtime.lastError);
           details = null;
         }
         resolve(details);
@@ -41,9 +41,9 @@ var gsChrome = {
         return;
       }
       details = typeof details === 'string' ? { url: details } : details;
-      chrome.tabs.create(details, tab => {
-        if (chrome.runtime.lastError) {
-          gsUtils.warning('chromeTabs', chrome.runtime.lastError);
+      gsBrowser.tabs.create(details, tab => {
+        if (gsBrowser.runtime.lastError) {
+          gsUtils.warning('chromeTabs', gsBrowser.runtime.lastError);
           tab = null;
         }
         resolve(tab);
@@ -57,9 +57,9 @@ var gsChrome = {
         resolve(false);
         return;
       }
-      chrome.tabs.reload(tabId, () => {
-        if (chrome.runtime.lastError) {
-          gsUtils.warning('chromeTabs', chrome.runtime.lastError);
+      gsBrowser.tabs.reload(tabId, () => {
+        if (gsBrowser.runtime.lastError) {
+          gsUtils.warning('chromeTabs', gsBrowser.runtime.lastError);
           resolve(false);
           return;
         }
@@ -77,9 +77,9 @@ var gsChrome = {
         resolve(null);
         return;
       }
-      chrome.tabs.update(tabId, updateProperties, tab => {
-        if (chrome.runtime.lastError) {
-          gsUtils.warning('chromeTabs', chrome.runtime.lastError);
+      gsBrowser.tabs.update(tabId, updateProperties, tab => {
+        if (gsBrowser.runtime.lastError) {
+          gsUtils.warning('chromeTabs', gsBrowser.runtime.lastError);
           tab = null;
         }
         resolve(tab);
@@ -93,9 +93,9 @@ var gsChrome = {
         resolve(null);
         return;
       }
-      chrome.tabs.get(tabId, tab => {
-        if (chrome.runtime.lastError) {
-          gsUtils.warning('chromeTabs', chrome.runtime.lastError);
+      gsBrowser.tabs.get(tabId, tab => {
+        if (gsBrowser.runtime.lastError) {
+          gsUtils.warning('chromeTabs', gsBrowser.runtime.lastError);
           tab = null;
         }
         resolve(tab);
@@ -105,9 +105,9 @@ var gsChrome = {
   tabsQuery: function(queryInfo) {
     queryInfo = queryInfo || {};
     return new Promise(resolve => {
-      chrome.tabs.query(queryInfo, tabs => {
-        if (chrome.runtime.lastError) {
-          gsUtils.warning('chromeTabs', chrome.runtime.lastError);
+      gsBrowser.tabs.query(queryInfo, tabs => {
+        if (gsBrowser.runtime.lastError) {
+          gsUtils.warning('chromeTabs', gsBrowser.runtime.lastError);
           tabs = [];
         }
         resolve(tabs);
@@ -121,9 +121,9 @@ var gsChrome = {
         resolve(null);
         return;
       }
-      chrome.tabs.remove(tabId, () => {
-        if (chrome.runtime.lastError) {
-          gsUtils.warning('chromeTabs', chrome.runtime.lastError);
+      gsBrowser.tabs.remove(tabId, () => {
+        if (gsBrowser.runtime.lastError) {
+          gsUtils.warning('chromeTabs', gsBrowser.runtime.lastError);
         }
         resolve();
       });
@@ -132,9 +132,9 @@ var gsChrome = {
 
   windowsGetLastFocused: function() {
     return new Promise(resolve => {
-      chrome.windows.getLastFocused({}, window => {
-        if (chrome.runtime.lastError) {
-          gsUtils.warning('chromeWindows', chrome.runtime.lastError);
+      gsBrowser.windows.getLastFocused({}, window => {
+        if (gsBrowser.runtime.lastError) {
+          gsUtils.warning('chromeWindows', gsBrowser.runtime.lastError);
           window = null;
         }
         resolve(window);
@@ -148,9 +148,9 @@ var gsChrome = {
         resolve(null);
         return;
       }
-      chrome.windows.get(windowId, { populate: true }, window => {
-        if (chrome.runtime.lastError) {
-          gsUtils.warning('chromeWindows', chrome.runtime.lastError);
+      gsBrowser.windows.get(windowId, { populate: true }, window => {
+        if (gsBrowser.runtime.lastError) {
+          gsUtils.warning('chromeWindows', gsBrowser.runtime.lastError);
           window = null;
         }
         resolve(window);
@@ -159,9 +159,9 @@ var gsChrome = {
   },
   windowsGetAll: function() {
     return new Promise(resolve => {
-      chrome.windows.getAll({ populate: true }, windows => {
-        if (chrome.runtime.lastError) {
-          gsUtils.warning('chromeWindows', chrome.runtime.lastError);
+      gsBrowser.windows.getAll({ populate: true }, windows => {
+        if (gsBrowser.runtime.lastError) {
+          gsUtils.warning('chromeWindows', gsBrowser.runtime.lastError);
           windows = [];
         }
         resolve(windows);
@@ -171,9 +171,9 @@ var gsChrome = {
   windowsCreate: function(createData) {
     createData = createData || {};
     return new Promise(resolve => {
-      chrome.windows.create(createData, window => {
-        if (chrome.runtime.lastError) {
-          gsUtils.warning('chromeWindows', chrome.runtime.lastError);
+      gsBrowser.windows.create(createData, window => {
+        if (gsBrowser.runtime.lastError) {
+          gsUtils.warning('chromeWindows', gsBrowser.runtime.lastError);
           window = null;
         }
         resolve(window);
@@ -187,9 +187,9 @@ var gsChrome = {
         resolve(null);
         return;
       }
-      chrome.windows.update(windowId, updateInfo, window => {
-        if (chrome.runtime.lastError) {
-          gsUtils.warning('chromeWindows', chrome.runtime.lastError);
+      gsBrowser.windows.update(windowId, updateInfo, window => {
+        if (gsBrowser.runtime.lastError) {
+          gsUtils.warning('chromeWindows', gsBrowser.runtime.lastError);
           window = null;
         }
         resolve(window);

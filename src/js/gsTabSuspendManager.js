@@ -1,4 +1,4 @@
-/*global html2canvas, domtoimage, tgs, gsFavicon, gsMessages, gsStorage, gsUtils, gsChrome, gsIndexedDb, gsTabDiscardManager, gsTabCheckManager, GsTabQueue */
+/*global gsBrowser, tgs, gsFavicon, gsMessages, gsStorage, gsUtils, gsChrome, gsIndexedDb, gsTabDiscardManager, gsTabCheckManager, gsCleanScreencaps, gsSuspendedTab, GsTabQueue, gsWorkbench */
 // eslint-disable-next-line no-unused-vars
 var gsTabSuspendManager = (function() {
   'use strict';
@@ -40,20 +40,23 @@ var gsTabSuspendManager = (function() {
     });
   }
 
-  function queueTabForSuspensionAsPromise(tab, forceLevel) {
-    if (typeof tab === 'undefined') return Promise.resolve();
+  function queueTabForSuspensionAsPromise(tab, forceLevel, options) {
+    if (typeof tab === 'undefined') return Promise.resolve(false);
 
-    if (!checkTabEligibilityForSuspension(tab, forceLevel)) {
+    if (!checkTabEligibilityForSuspension(tab, forceLevel, options)) {
       gsUtils.log(tab.id, QUEUE_ID, 'Tab not eligible for suspension.');
-      return Promise.resolve();
+      return Promise.resolve(false);
     }
 
     gsUtils.log(tab.id, QUEUE_ID, 'Queueing tab for suspension.');
-    return _suspensionQueue.queueTabAsPromise(tab, { forceLevel });
+    return _suspensionQueue.queueTabAsPromise(tab, { forceLevel, ...options });
   }
 
   function unqueueTabForSuspension(tab) {
     const removed = _suspensionQueue.unqueueTab(tab);
+    gsCleanScreencaps.cancelTab(tab.id).catch(error => {
+      console.error('Failed to release cancelled capture rules', error);
+    });
     if (removed) {
       gsUtils.log(tab.id, QUEUE_ID, 'Removed tab from suspension queue.');
     }
@@ -66,7 +69,8 @@ var gsTabSuspendManager = (function() {
     reject,
     requeue
   ) {
-    if (executionProps.refetchTab || gsUtils.isSuspendedTab(tab)) {
+    if (executionProps.refetchTab || gsUtils.isSuspendedTab(tab) ||
+        executionProps.forceLevel >= 2 || executionProps.workbench) {
       gsUtils.log(
         tab.id,
         QUEUE_ID,
@@ -83,6 +87,11 @@ var gsTabSuspendManager = (function() {
         return;
       }
       tab = _tab;
+    }
+
+    if (!checkTabEligibilityForSuspension(tab, executionProps.forceLevel, executionProps)) {
+      resolve(false);
+      return;
     }
 
     if (gsUtils.isSuspendedTab(tab)) {
@@ -125,7 +134,7 @@ var gsTabSuspendManager = (function() {
           QUEUE_ID,
           'Interrupting tab loading to resuspend tab'
         );
-        const success = await executeTabSuspension(tab, suspendedUrl);
+        const success = await executeTabSuspension(tab, suspendedUrl, executionProps);
         resolve(success);
       } else {
         requeue(3000, { refetchTab: true });
@@ -133,14 +142,19 @@ var gsTabSuspendManager = (function() {
       return;
     }
 
-    const discardInPlaceOfSuspend = gsStorage.getOption(
-      gsStorage.DISCARD_IN_PLACE_OF_SUSPEND
-    );
+    const discardInPlaceOfSuspend = typeof executionProps.discardInPlace === 'boolean' ?
+      executionProps.discardInPlace : gsStorage.getOption(gsStorage.DISCARD_IN_PLACE_OF_SUSPEND);
     if (discardInPlaceOfSuspend) {
       screenCaptureMode = '0';
     }
 
     let tabInfo = await getContentScriptTabInfo(tab);
+    if (shouldProtectForms(tab.id, executionProps.forceLevel, executionProps.workbench) &&
+        !tab.discarded && (!tabInfo || typeof tabInfo.dirty !== 'boolean' ||
+        typeof tabInfo.draftUnverified !== 'boolean' || tabInfo.dirty || tabInfo.draftUnverified)) {
+      resolve(false);
+      return;
+    }
 
     // If tabInfo is null this is usually due to tab loading, being discarded or 'parked' on chrome restart
     // If we need to make a screen capture and tab is not responding then reload it
@@ -165,8 +179,10 @@ var gsTabSuspendManager = (function() {
     };
 
     const isEligible = checkContentScriptEligibilityForSuspension(
-      tabInfo.status,
-      executionProps.forceLevel
+      tabInfo,
+      executionProps.forceLevel,
+      executionProps.workbench,
+      tab.id
     );
     if (!isEligible) {
       gsUtils.log(
@@ -181,7 +197,7 @@ var gsTabSuspendManager = (function() {
     }
 
     // Temporarily change tab.url to append youtube timestamp
-    const timestampedUrl = await generateUrlWithYouTubeTimestamp(tab);
+    const timestampedUrl = executionProps.preserveExactUrl ? tab.url : await generateUrlWithYouTubeTimestamp(tab);
     // NOTE: This does not actually change the tab url, just the current tab object
     tab.url = timestampedUrl;
     await saveSuspendData(tab);
@@ -194,7 +210,7 @@ var gsTabSuspendManager = (function() {
     executionProps.suspendedUrl = suspendedUrl;
 
     if (screenCaptureMode === '0') {
-      const success = await executeTabSuspension(tab, suspendedUrl);
+      const success = await executeTabSuspension(tab, suspendedUrl, executionProps);
       resolve(success);
       return;
     }
@@ -212,8 +228,6 @@ var gsTabSuspendManager = (function() {
   }
 
   async function handlePreviewImageResponse(tab, previewUrl, errorMsg) {
-    // remove listener if there is any
-    gsCleanScreencaps.removeListener(tab.id);
 
     const queuedTabDetails = getQueuedTabDetails(tab);
     if (!queuedTabDetails) {
@@ -226,12 +240,13 @@ var gsTabSuspendManager = (function() {
     }
 
     const suspensionForceLevel = queuedTabDetails.executionProps.forceLevel;
-    if (!checkTabEligibilityForSuspension(tab, suspensionForceLevel)) {
+    if (!checkTabEligibilityForSuspension(tab, suspensionForceLevel, queuedTabDetails.executionProps)) {
       gsUtils.log(
         tab.id,
         QUEUE_ID,
         'Tab is no longer eligible for suspension. Removing tab from suspensionQueue.'
       );
+      queuedTabDetails.executionProps.resolveFn(false);
       return;
     }
 
@@ -251,12 +266,13 @@ var gsTabSuspendManager = (function() {
         errorMsg
       );
     } else {
-      await gsIndexedDb.addPreviewImage(tab.url, previewUrl);
+      await gsSuspendedTab.savePreview(tab, previewUrl);
     }
 
     const success = await executeTabSuspension(
       tab,
-      queuedTabDetails.executionProps.suspendedUrl
+      queuedTabDetails.executionProps.suspendedUrl,
+      queuedTabDetails.executionProps
     );
 
     queuedTabDetails.executionProps.resolveFn(success);
@@ -274,6 +290,7 @@ var gsTabSuspendManager = (function() {
     reject,
     requeue
   ) {
+    await gsCleanScreencaps.cancelTab(tab.id);
     if (exceptionType === _suspensionQueue.EXCEPTION_TIMEOUT) {
       gsUtils.log(
         tab.id,
@@ -283,7 +300,8 @@ var gsTabSuspendManager = (function() {
       );
       const success = await executeTabSuspension(
         tab,
-        executionProps.suspendedUrl
+        executionProps.suspendedUrl,
+        executionProps
       );
       resolve(success);
     } else {
@@ -296,51 +314,166 @@ var gsTabSuspendManager = (function() {
     }
   }
 
-  function executeTabSuspension(tab, suspendedUrl) {
-    return new Promise(resolve => {
-      // Remove any existing queued tab checks (this can happen if we try to suspend
-      // a tab immediately after it gains focus)
-      gsTabCheckManager.unqueueTabCheck(tab);
-
-      // If we want tabs to be discarded instead of suspending them
-      let discardInPlaceOfSuspend = gsStorage.getOption(
-        gsStorage.DISCARD_IN_PLACE_OF_SUSPEND
-      );
-      if (discardInPlaceOfSuspend) {
-        tgs.clearAutoSuspendTimerForTabId(tab.id);
-        gsTabDiscardManager.queueTabForDiscard(tab);
-        resolve(true);
-        return;
-      }
-
-      if (gsUtils.isSuspendedTab(tab, true)) {
-        gsUtils.log(tab.id, 'Tab already suspended');
-        resolve(false);
-        return;
-      }
-
-      if (!suspendedUrl) {
-        gsUtils.log(tab.id, 'executionProps.suspendedUrl not set!');
-        suspendedUrl = gsUtils.generateSuspendedUrl(tab.url, tab.title, 0);
-      }
-
-      gsUtils.log(tab.id, 'Suspending tab');
-      tgs.setTabStatePropForTabId(
-        tab.id,
-        tgs.STATE_INITIALISE_SUSPENDED_TAB,
-        true
-      );
-      gsChrome.tabsUpdate(tab.id, { url: suspendedUrl }).then(updatedTab => {
-        resolve(updatedTab !== null);
+  async function executeTabSuspension(tab, suspendedUrl, executionProps) {
+    executionProps = executionProps || { forceLevel: 3 };
+    let currentTab = await gsChrome.tabsGet(tab.id);
+    if (!currentTab || gsUtils.isSuspendedTab(currentTab, true) ||
+        !checkTabEligibilityForSuspension(currentTab, executionProps.forceLevel, executionProps)) {
+      return false;
+    }
+    if (executionProps.expectedOriginalUrl &&
+        executionProps.expectedOriginalUrl !== currentTab.url) {
+      return false;
+    }
+    if (typeof executionProps.guard === 'function') {
+      const meta = gsWorkbench.getMeta(currentTab.id) || {};
+      const reasons = await executionProps.guard({
+        ...currentTab,
+        uid: meta.uid,
+        originalUrl: currentTab.url,
+        workspaceId: meta.workspaceId || null,
       });
-    });
+      if (!Array.isArray(reasons) || reasons.length) return false;
+    }
+
+    const protectForms = shouldProtectForms(currentTab.id, executionProps.forceLevel, executionProps.workbench);
+    let lease = null;
+    if (executionProps.forceLevel >= 2 || executionProps.workbench) {
+      if (!currentTab.discarded) {
+        const info = await getContentScriptTabInfo(currentTab, 'prepareTabAction', { allowDirtyForPolicy: !protectForms });
+        const verifiedLease = info && info.draftLease && info.documentUrl === currentTab.url &&
+          info.draftLease.expiresAt > Date.now() &&
+          typeof info.dirty === 'boolean' && typeof info.draftUnverified === 'boolean';
+        if ((protectForms && !verifiedLease) ||
+            !checkContentScriptEligibilityForSuspension(info || { status: 'unknown' }, executionProps.forceLevel, executionProps.workbench, currentTab.id) ||
+            !checkTabEligibilityForSuspension(currentTab, executionProps.forceLevel, executionProps)) {
+          if (info && info.draftLease) {
+            gsMessages.sendMessageToContentScript(currentTab.id, {
+              action: 'releaseTabAction', token: info.draftLease.token,
+            }, gsMessages.WARNING);
+          }
+          return false;
+        }
+        lease = verifiedLease ? info.draftLease : null;
+      }
+    }
+    const latestTab = await gsChrome.tabsGet(currentTab.id);
+    if (!latestTab || latestTab.url !== currentTab.url || gsUtils.isSuspendedTab(latestTab, true) ||
+        !checkTabEligibilityForSuspension(latestTab, executionProps.forceLevel, executionProps) ||
+        (protectForms && !latestTab.discarded && !lease) ||
+        (lease && lease.expiresAt <= Date.now())) {
+      if (lease) gsMessages.sendMessageToContentScript(currentTab.id, {
+        action: 'releaseTabAction', token: lease.token,
+      }, gsMessages.WARNING);
+      return false;
+    }
+    currentTab = latestTab;
+
+    gsTabCheckManager.unqueueTabCheck(currentTab);
+    const discardInPlaceOfSuspend = typeof executionProps.discardInPlace === 'boolean' ?
+      executionProps.discardInPlace : gsStorage.getOption(gsStorage.DISCARD_IN_PLACE_OF_SUSPEND);
+    let success = false;
+    if (discardInPlaceOfSuspend) {
+      tgs.clearAutoSuspendTimerForTabId(currentTab.id);
+      let leaseActive = true;
+      const renew = lease ? setInterval(async () => {
+        try {
+          const protectsNow = shouldProtectForms(currentTab.id, executionProps.forceLevel, executionProps.workbench);
+          const info = await getContentScriptTabInfo(currentTab, 'prepareTabAction', { allowDirtyForPolicy: !protectsNow });
+          if (!leaseActive) {
+            if (info && info.draftLease) {
+              gsMessages.sendMessageToContentScript(currentTab.id, {
+                action: 'releaseTabAction', token: info.draftLease.token,
+              }, gsMessages.WARNING);
+            }
+          } else if (!info || !info.draftLease ||
+              !checkContentScriptEligibilityForSuspension(info, executionProps.forceLevel, executionProps.workbench, currentTab.id) ||
+              info.documentUrl !== currentTab.url) {
+            gsTabDiscardManager.unqueueTabForDiscard(currentTab);
+          } else {
+            lease = info.draftLease;
+          }
+        } catch (error) {
+          if (leaseActive) gsTabDiscardManager.unqueueTabForDiscard(currentTab);
+        }
+      }, 750) : null;
+      try {
+        success = !!(await gsTabDiscardManager.queueTabForDiscardAsPromise(currentTab, {
+          beforeDiscard: async rawTab => {
+            if (!checkTabEligibilityForSuspension(rawTab, executionProps.forceLevel, executionProps) ||
+                (executionProps.expectedOriginalUrl && executionProps.expectedOriginalUrl !== rawTab.url)) return false;
+            if (!rawTab.discarded) {
+              const protectsNow = shouldProtectForms(rawTab.id, executionProps.forceLevel, executionProps.workbench);
+              const info = await getContentScriptTabInfo(rawTab, 'prepareTabAction', { allowDirtyForPolicy: !protectsNow });
+              const verified = info && info.draftLease && info.documentUrl === rawTab.url &&
+                info.draftLease.expiresAt > Date.now();
+              if ((protectsNow && !verified) ||
+                  !checkContentScriptEligibilityForSuspension(info || { status: 'unknown' }, executionProps.forceLevel, executionProps.workbench, rawTab.id) ||
+                  !checkTabEligibilityForSuspension(rawTab, executionProps.forceLevel, executionProps)) return false;
+              if (verified) lease = info.draftLease;
+            }
+            const latest = await gsChrome.tabsGet(rawTab.id);
+            if (!latest || latest.url !== rawTab.url ||
+                !checkTabEligibilityForSuspension(latest, executionProps.forceLevel, executionProps) ||
+                (lease && lease.expiresAt <= Date.now())) return false;
+            if (executionProps.workbench) gsWorkbench.intent(rawTab.id, 'suspend', executionProps.reason || 'bulk-suspend');
+            return true;
+          },
+        }));
+      } catch (error) {
+        gsUtils.warning(currentTab.id, 'Discard cancelled during safety revalidation', error);
+      } finally {
+        leaseActive = false;
+        clearInterval(renew);
+      }
+    } else {
+      if (!suspendedUrl) {
+        suspendedUrl = gsUtils.generateSuspendedUrl(currentTab.url, currentTab.title, 0);
+      }
+      gsUtils.log(currentTab.id, 'Suspending tab');
+      if (executionProps.workbench) {
+        gsWorkbench.intent(currentTab.id, 'suspend', executionProps.reason || 'bulk-suspend');
+      }
+      tgs.setTabStatePropForTabId(currentTab.id, tgs.STATE_INITIALISE_SUSPENDED_TAB, true);
+      const updatedTab = await gsChrome.tabsUpdate(currentTab.id, { url: suspendedUrl });
+      success = updatedTab !== null;
+    }
+    if (lease) {
+      gsMessages.sendMessageToContentScript(currentTab.id, {
+        action: 'releaseTabAction',
+        token: lease.token,
+      }, gsMessages.WARNING);
+    }
+    return success;
   }
 
   // forceLevel indicates which users preferences to respect when attempting to suspend the tab
   // 1: Suspend if at all possible
   // 2: Respect whitelist, temporary whitelist, form input, pinned tabs, audible preferences, and exclude current active tab
   // 3: Same as above (2), plus also respect internet connectivity, running on battery, and time to suspend=never preferences.
-  function checkTabEligibilityForSuspension(tab, forceLevel) {
+  function checkTabEligibilityForSuspension(tab, forceLevel, options) {
+    const hasWorkbench = !tab.incognito && typeof gsWorkbench !== 'undefined' && gsWorkbench.isReady();
+    if (hasWorkbench && (forceLevel >= 2 || (options && options.workbench))) {
+      const meta = gsWorkbench.getMeta(tab.id);
+      const row = {
+        ...tab,
+        originalUrl: gsUtils.isSuspendedTab(tab) ? gsUtils.getOriginalUrl(tab.url) : tab.url,
+        asleep: !!tab.discarded || gsUtils.isSuspendedTab(tab),
+        status: tab.status === 'loading' ? 'loading' : tab.discarded ? 'discarded' :
+          gsUtils.isSuspendedTab(tab) ? 'suspended' : 'awake',
+        workspaceId: meta ? meta.workspaceId : null,
+      };
+      if (gsWorkbench.getProtectionReasonsSync(row, 'suspend', {
+        ...options,
+        respectSuspensionPolicy: !(options && options.workbench),
+      }).length) {
+        return false;
+      }
+    } else if (!tab.incognito && typeof gsWorkbench !== 'undefined' &&
+        (forceLevel >= 2 || (options && options.workbench))) {
+      // No automatic suspension may race initial policy hydration.
+      return false;
+    }
     if (forceLevel >= 1) {
       // if (gsUtils.isSuspendedTab(tab, true) || gsUtils.isSpecialTab(tab)) {
       // actually allow suspended tabs to attempt suspension in case they are
@@ -350,7 +483,7 @@ var gsTabSuspendManager = (function() {
         return false;
       }
     }
-    if (forceLevel >= 2) {
+    if (forceLevel >= 2 && !hasWorkbench) {
       if (
         gsUtils.isProtectedActiveTab(tab) ||
         gsUtils.checkWhiteList(tab.url) ||
@@ -373,30 +506,44 @@ var gsTabSuspendManager = (function() {
       ) {
         return false;
       }
-      if (gsStorage.getOption(gsStorage.SUSPEND_TIME) === '0') {
+      if ((hasWorkbench ? gsWorkbench.getSuspendMinutes(tab.id) :
+          gsStorage.getOption(gsStorage.SUSPEND_TIME)) === '0') {
         return false;
       }
     }
     return true;
   }
 
+  function shouldProtectForms(tabId, forceLevel, workbench) {
+    if (workbench) return true;
+    if (!(forceLevel >= 2)) return false;
+    return !gsBrowser.extension.inIncognitoContext && typeof gsWorkbench !== 'undefined' && gsWorkbench.isReady() ?
+      !!gsWorkbench.getPolicy(tabId).ignoreForms : !!gsStorage.getOption(gsStorage.IGNORE_FORMS);
+  }
+
   function checkContentScriptEligibilityForSuspension(
-    contentScriptStatus,
-    forceLevel
+    tabInfo,
+    forceLevel,
+    workbench,
+    tabId
   ) {
-    if (
-      forceLevel >= 2 &&
-      (contentScriptStatus === gsUtils.STATUS_FORMINPUT ||
-        contentScriptStatus === gsUtils.STATUS_TEMPWHITELIST)
-    ) {
+    if ((forceLevel >= 2 || workbench) &&
+        (tabInfo.temporaryWhitelist || tabInfo.status === gsUtils.STATUS_TEMPWHITELIST)) {
+      return false;
+    }
+    if (shouldProtectForms(tabId, forceLevel, workbench) &&
+        (tabInfo.dirty || tabInfo.draftUnverified || tabInfo.status === gsUtils.STATUS_FORMINPUT)) {
       return false;
     }
     return true;
   }
 
-  function getContentScriptTabInfo(tab) {
+  function getContentScriptTabInfo(tab, action, options) {
     return new Promise(resolve => {
-      gsMessages.sendRequestInfoToContentScript(tab.id, (error, tabInfo) => {
+      gsMessages.sendMessageToContentScript(tab.id, {
+        action: action || 'requestInfo',
+        ...options,
+      }, gsMessages.WARNING, (error, tabInfo) => {
         //TODO: Should we wait here for the tab to load? Doesnt seem to matter..
         if (error) {
           gsUtils.warning(
@@ -420,10 +567,9 @@ var gsTabSuspendManager = (function() {
         return;
       }
 
-      gsMessages.executeCodeOnTab(
-        tab.id,
-        `(${fetchYouTubeTimestampContentScript})();`,
-        (error, response) => {
+      gsMessages.runJobOnTab(
+        tab.id, 'youtubeTimestamp', [],
+        (error, results) => {
           if (error) {
             gsUtils.warning(
               tab.id,
@@ -432,12 +578,11 @@ var gsTabSuspendManager = (function() {
               error
             );
           }
-          if (!response) {
+          const timestamp = results && results[0] && results[0].result;
+          if (!Number.isFinite(timestamp)) {
             resolve(tab.url);
             return;
           }
-
-          const timestamp = response;
           const youTubeUrl = new URL(tab.url);
           youTubeUrl.searchParams.set('t', timestamp + 's');
           resolve(youTubeUrl.href);
@@ -446,15 +591,9 @@ var gsTabSuspendManager = (function() {
     });
   }
 
-  function fetchYouTubeTimestampContentScript() {
-    const videoEl = document.querySelector(
-      'video.video-stream.html5-main-video'
-    );
-    const timestamp = videoEl ? videoEl.currentTime >> 0 : 0;
-    return timestamp;
-  }
 
   async function saveSuspendData(tab) {
+    if (tab.incognito) return;
     const tabProperties = {
       date: new Date(),
       title: tab.title,
@@ -474,177 +613,48 @@ var gsTabSuspendManager = (function() {
     }
   }
 
-  function requestGeneratePreviewImage(tab) {
-    // Will not implement this for now as it does not actually capture the whole
-    // screen, just the visible area
-    // NOTE: It also requires the <all_urls> manifest permission
-    // if (tab.active) {
-    //   chrome.tabs.captureVisibleTab(
-    //     tab.windowId,
-    //     { format: 'png' },
-    //     dataUrl => {
-    //       handlePreviewImageResponse(tab, dataUrl, chrome.runtime.lastError);
-    //     }
-    //   ); //async. unhandled promise.
-    //   return;
-    // }
-
+  async function requestGeneratePreviewImage(tab) {
     const screenCaptureMode = gsStorage.getOption(gsStorage.SCREEN_CAPTURE);
-    const forceScreenCapture = gsStorage.getOption(
-      gsStorage.SCREEN_CAPTURE_FORCE
-    );
-    const useAlternateScreenCaptureLib = gsStorage.getOption(
-      gsStorage.USE_ALT_SCREEN_CAPTURE_LIB
-    );
-    const useCleanScreencap = gsStorage.getOption(
-      gsStorage.ENABLE_CLEAN_SCREENCAPS
-    );
+    const forceScreenCapture = gsStorage.getOption(gsStorage.SCREEN_CAPTURE_FORCE);
+    const useAlternateScreenCaptureLib = gsStorage.getOption(gsStorage.USE_ALT_SCREEN_CAPTURE_LIB);
     const screenCaptureLib = useAlternateScreenCaptureLib
-      ? 'js/dom-to-image.js'
-      : 'js/html2canvas.min.js';
-    gsUtils.log(
-      tab.id,
-      QUEUE_ID,
-      `Injecting ${screenCaptureLib} into content script`
-    );
-
-    if (useCleanScreencap) {
-      gsCleanScreencaps.addListener(tab.id)
-    }
-
-    gsMessages.executeScriptOnTab(tab.id, screenCaptureLib, error => {
-      if (error) {
-        handlePreviewImageResponse(tab, null, 'Failed to executeScriptOnTab'); //async. unhandled promise.
-        return;
-      }
-      gsMessages.executeCodeOnTab(
-        tab.id,
-        `(${generatePreviewImageCanvasViaContentScript})("${screenCaptureMode}", ${forceScreenCapture}, ${useAlternateScreenCaptureLib});`,
-        error => {
-          if (error) {
-            handlePreviewImageResponse(
-              tab,
-              null,
-              'Failed to executeCodeOnTab: generatePreviewImgContentScript'
-            ); //async. unhandled promise.
-            return;
-          }
-        }
-      );
-    });
-  }
-
-  // NOTE: This function below is run within the content script scope
-  // Therefore it must be self contained and not refer to any external functions
-  // such as references to gsUtils etc.
-  // eslint-disable-next-line no-unused-vars
-  async function generatePreviewImageCanvasViaContentScript(
-    screenCaptureMode,
-    forceScreenCapture,
-    useAlternateScreenCaptureLib
-  ) {
-    const MAX_CANVAS_HEIGHT = forceScreenCapture ? 10000 : 5000;
-    const IMAGE_TYPE = 'image/webp';
-    const IMAGE_QUALITY = forceScreenCapture ? 0.92 : 0.5;
-
-    let height = 0;
-    let width = 0;
-
-    //check where we need to capture the whole screen
-    if (screenCaptureMode === '2') {
-      height = Math.max(
-        window.innerHeight,
-        document.body.scrollHeight,
-        document.body.offsetHeight,
-        document.documentElement.clientHeight,
-        document.documentElement.scrollHeight,
-        document.documentElement.offsetHeight
-      );
-      // cap the max height otherwise it fails to convert to a data url
-      height = Math.min(height, MAX_CANVAS_HEIGHT);
-    } else {
-      height = window.innerHeight;
-    }
-    width = document.body.clientWidth;
-
-    let generateCanvas;
-    if (useAlternateScreenCaptureLib) {
-      // console.log('Generating via dom-to-image..');
-      generateCanvas = () => {
-        return domtoimage
-          .toCanvas(document.body, { width: width, height: height })
-          .then(canvas => {
-            const croppedCanvas = document.createElement('canvas');
-            const context = croppedCanvas.getContext('2d');
-            croppedCanvas.width = width;
-            croppedCanvas.height = height;
-            context.drawImage(canvas, 0, 0);
-            return croppedCanvas;
-          });
-      };
-    } else {
-      // console.log('Generating via html2canvas..');
-      generateCanvas = () => {
-        return html2canvas(document.body, {
-          height: height,
-          width: width,
-          logging: false,
-          imageTimeout: 10000,
-          removeContainer: false,
-          foreignObjectRendering: true,
-          async: true,
-        });
-      };
-    }
-
-    const isCanvasVisible = canvas => {
-      var ctx = canvas.getContext('2d');
-      var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      for (var i = 0; i < imageData.data.length; i += 4) {
-        const isTransparent = imageData.data[i + 3] === 0;
-        const isWhite =
-          imageData.data[i] === 255 &&
-          imageData.data[i + 1] === 255 &&
-          imageData.data[i + 2] === 255;
-        if (!isTransparent && !isWhite) {
-          return true;
-        }
-      }
-      return false;
-    };
-
-    const generateDataUrl = canvas => {
-      let dataUrl = canvas.toDataURL(IMAGE_TYPE, IMAGE_QUALITY);
-      if (!dataUrl || dataUrl === 'data:,') {
-        dataUrl = canvas.toDataURL();
-      }
-      if (dataUrl === 'data:,') {
-        dataUrl = null;
-      }
-      return dataUrl;
-    };
-
-    let dataUrl;
-    let errorMsg;
+      ? 'js/dom-to-image.js' : 'js/html2canvas.min.js';
+    let capture;
+    let image;
     try {
-      const canvas = await generateCanvas();
-      if (!isCanvasVisible(canvas)) {
-        errorMsg = 'Canvas contains no visible pixels';
-      } else {
-        dataUrl = generateDataUrl(canvas);
+      if (gsStorage.getOption(gsStorage.ENABLE_CLEAN_SCREENCAPS)) {
+        capture = await gsCleanScreencaps.beginCapture(tab.id, _suspensionQueue.getQueueProperties().jobTimeout);
       }
-    } catch (err) {
-      errorMsg = err.message;
+      await new Promise((resolve, reject) => {
+        gsMessages.injectFileOnTab(tab.id, screenCaptureLib, error => {
+          if (error) reject(new Error(error.message || String(error)));
+          else resolve();
+        });
+      });
+      const results = await new Promise((resolve, reject) => {
+        gsMessages.runJobOnTab(tab.id, 'capturePreview', [
+          screenCaptureMode, forceScreenCapture, useAlternateScreenCaptureLib,
+          capture ? capture.blockedHosts : null,
+        ], (error, result) => {
+          if (error) reject(new Error(error.message || String(error)));
+          else resolve(result);
+        });
+      });
+      image = results && results[0] && results[0].result;
+      if (!image || typeof image !== 'object') {
+        throw new Error('Capture job returned no image result');
+      }
+    } catch (error) {
+      image = { previewUrl: null, errorMsg: error.message || String(error) };
+    } finally {
+      try {
+        await gsCleanScreencaps.endCapture(capture);
+      } catch (error) {
+        console.error('Failed to release clean capture rules', error);
+        image = { previewUrl: null, errorMsg: error.message || String(error) };
+      }
     }
-    if (!dataUrl && !errorMsg) {
-      errorMsg = 'Failed to generate dataUrl';
-    }
-    // console.log('saving previewData..');
-    chrome.runtime.sendMessage({
-      action: 'savePreviewData',
-      previewUrl: dataUrl,
-      errorMsg: errorMsg,
-    });
+    await handlePreviewImageResponse(tab, image.previewUrl, image.errorMsg);
   }
 
   return {

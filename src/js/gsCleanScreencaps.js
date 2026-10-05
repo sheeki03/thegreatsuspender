@@ -1,91 +1,120 @@
-var gsCleanScreencaps = {
-  // this will be filled with domain entries for O(1) lookups during screencaps
-  blacklist: {},
+/*global gsBrowser, gsStorage, gsUtils */
+// Clean captures use short-lived, image-only DNR session rules scoped to one tab.
+// eslint-disable-next-line no-unused-vars
+var gsCleanScreencaps = (function() {
+  'use strict';
+  const FIRST_RULE_ID = gsBrowser.extension.inIncognitoContext ? 1250000000 : 1200000000;
+  const LAST_RULE_ID = FIRST_RULE_ID + 49999999;
+  const CACHE_LIFETIME = 30 * 24 * 60 * 60 * 1000;
+  const activeCaptures = new Map();
+  let nextRuleId = FIRST_RULE_ID;
+  let blacklist = null;
+  let loading = null;
 
-  // listeners for request coming from a tab that is being suspended
-  listeners: {},
+  function call(method, value) {
+    return new Promise((resolve, reject) => {
+      const callback = result => {
+        if (gsBrowser.runtime.lastError) reject(new Error(gsBrowser.runtime.lastError.message));
+        else resolve(result);
+      };
+      if (value === undefined) gsBrowser.declarativeNetRequest[method](callback);
+      else gsBrowser.declarativeNetRequest[method](value, callback);
+    });
+  }
 
-  // load blacklist on initialization if option is enabled
-  initAsPromised: async ()=>
-  {
-    const useCleanScreencap = gsStorage.getOption(
-      gsStorage.ENABLE_CLEAN_SCREENCAPS
-    );
+  async function initAsPromised() {
+    const rules = await call('getSessionRules');
+    const removeRuleIds = rules.filter(rule => rule.id >= FIRST_RULE_ID && rule.id <= LAST_RULE_ID)
+      .map(rule => rule.id);
+    if (removeRuleIds.length) await call('updateSessionRules', { removeRuleIds });
+  }
 
-    if (useCleanScreencap) {
-      await gsCleanScreencaps.loadList()
-    }
-
-    return;
-  },
-
-  addListener: (tabId) => {
-    // remove a listener if there is already one present. That might not be the case, but the function checks for that case.
-    gsCleanScreencaps.removeListener(tabId);
-
-    const listener = (details) => {
-      try {
-        const host = new URL(details.url).host
-        if (gsCleanScreencaps.blacklist[host]) { return { cancel: true }; }
-      } catch (err) {
-        gsUtils.log('background', 'error while trying to block in gsCleanScreencaps', err)
+  async function loadList() {
+    if (blacklist) return blacklist;
+    if (loading) return loading;
+    loading = (async () => {
+      const stored = await new Promise((resolve, reject) => {
+        gsBrowser.storage.local.get('gsCleanScreencapsBlacklist', result => {
+          if (gsBrowser.runtime.lastError) reject(new Error(gsBrowser.runtime.lastError.message));
+          else resolve(result.gsCleanScreencapsBlacklist);
+        });
+      });
+      if (stored && stored.blockedHosts && stored.time + CACHE_LIFETIME > Date.now()) {
+        blacklist = stored.blockedHosts;
+        return blacklist;
       }
-    }
-
-    chrome.webRequest.onBeforeRequest.addListener(
-      listener,
-      { urls: ["<all_urls>"], types: ['image'], tabId: tabId },
-      ["blocking"]
-    );
-
-    // place a callback that will remove the listener as soon as the suspension
-    // of the tab succeeded or failed
-    gsCleanScreencaps.listeners[tabId] = () => chrome.webRequest.onBeforeRequest.removeListener(listener)
-  },
-
-  // call the remove listener func and remove it from the hashmap
-  removeListener: (tabId) => {
-    let tmp;
-    if (tmp = gsCleanScreencaps.listeners[tabId]) {
-      delete gsCleanScreencaps[tabId];
-      tmp();
-    }
-  },
-
-  // do nothing but get the data out of the chrome.local.storage
-  storageData: () => {
-    return new Promise((res, _) => {
-      chrome.storage.local.get('gsCleanScreencapsBlacklist', (storage) => res(storage.gsCleanScreencapsBlacklist))
-    })
-  },
-
-  loadList: async () => {
-    const stored = await gsCleanScreencaps.storageData();
-    // take the blocklist out of storage if it's not existent or newer than 30 days
-    if (!stored || stored.time + (3600 * 24 * 30) <= new Date().getTime()) {
-      const rex = /^0.0.0.0 (.*)(?:$|#)/
-      let resp = await fetch('https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts').then(resp => resp.text())
-      let m;
-
-      try {
-        const blockedHosts = resp
-          .split(/\n/)
-          .reduce((res, e) => {
-            if (m = rex.exec(e)) {
-              res[m[1]] = true;
-            }
-            return res;
-          }, {});
-
-        gsCleanScreencaps.blacklist = blockedHosts;
-        chrome.storage.local.set({ gsCleanScreencapsBlacklist: { time: new Date().getTime(), blockedHosts } })
-        return blockedHosts;
-      } catch (err) {
-        gsUtils.log('background', 'error while loading blocklist for clean screencapture:', err)
+      const response = await fetch('https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts');
+      if (!response.ok) throw new Error('Clean capture blocklist request failed: ' + response.status);
+      const text = await response.text();
+      const blockedHosts = {};
+      for (const line of text.split('\n')) {
+        const match = /^0\.0\.0\.0\s+([^\s#]+)/.exec(line);
+        if (match && match[1] !== '0.0.0.0') blockedHosts[match[1].toLowerCase()] = true;
       }
-    } else {
-      gsCleanScreencaps.blacklist = stored.blockedHosts;
-      return stored;
+      if (!Object.keys(blockedHosts).length) throw new Error('Clean capture blocklist contains no hosts');
+      await new Promise((resolve, reject) => {
+        gsBrowser.storage.local.set({ gsCleanScreencapsBlacklist: { time: Date.now(), blockedHosts } }, () => {
+          if (gsBrowser.runtime.lastError) reject(new Error(gsBrowser.runtime.lastError.message));
+          else resolve();
+        });
+      });
+      blacklist = blockedHosts;
+      return blacklist;
+    })();
+    try {
+      return await loading;
+    } finally {
+      loading = null;
     }
   }
-}
+
+  async function beginCapture(tabId, timeoutMs) {
+    await cancelTab(tabId);
+    const blockedHosts = await loadList();
+    const domains = Object.keys(blockedHosts);
+    const rules = [];
+    for (let offset = 0; offset < domains.length; offset += 1000) {
+      if (nextRuleId > LAST_RULE_ID) throw new Error('Clean capture rule IDs exhausted');
+      rules.push({
+        id: nextRuleId++, priority: 1, action: { type: 'block' },
+        condition: { tabIds: [tabId], resourceTypes: ['image'], requestDomains: domains.slice(offset, offset + 1000) },
+      });
+    }
+    const capture = { tabId, blockedHosts, ruleIds: rules.map(rule => rule.id), timer: null };
+    capture.installing = call('updateSessionRules', { addRules: rules });
+    activeCaptures.set(tabId, capture);
+    try {
+      await capture.installing;
+      if (activeCaptures.get(tabId) === capture) {
+        capture.timer = setTimeout(() => endCapture(capture).catch(error => {
+          console.error('Failed to release clean capture rules', error);
+        }), timeoutMs || 60000);
+      }
+      return capture;
+    } catch (error) {
+      if (activeCaptures.get(tabId) === capture) activeCaptures.delete(tabId);
+      throw error;
+    }
+  }
+
+  async function endCapture(capture) {
+    if (!capture) return;
+    if (capture.releasing) return capture.releasing;
+    clearTimeout(capture.timer);
+    capture.releasing = (async () => {
+      try {
+        await capture.installing;
+        await call('updateSessionRules', { removeRuleIds: capture.ruleIds });
+      } finally {
+        if (activeCaptures.get(capture.tabId) === capture) activeCaptures.delete(capture.tabId);
+      }
+    })();
+    return capture.releasing;
+  }
+
+  function cancelTab(tabId) {
+    return endCapture(activeCaptures.get(tabId));
+  }
+
+  return { initAsPromised, loadList, beginCapture, endCapture, cancelTab };
+})();

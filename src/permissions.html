@@ -2,9 +2,14 @@
 <html>
 
 <head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <link type="text/css" href="css/style.css" rel="stylesheet">
-  <script type="text/javascript" src="js/historyUtils.js"></script>
-  <script type="text/javascript" src="js/permissions.js"></script>
+  <link type="text/css" href="css/legacyPages.css" rel="stylesheet">
+  <script defer src="js/workbenchClient.js"></script>
+  <script defer src="js/legacyUi.js"></script>
+  <script defer src="js/historyUtils.js"></script>
+  <script defer src="js/permissions.js"></script>
   <title id="gsTitle" data-i18n="__MSG_ext_extension_name__ - __MSG_html_permissions_title__"></title>
 </head>
 
@@ -22,8 +27,8 @@
 
       <hr />
       <div>
-        <a href="#" id="exportBackupBtn" class="btn" data-i18n="__MSG_js_permissions_button_export__"></a>
-        <a href="#" id="setFilePermissiosnBtn" class="btn" data-i18n="__MSG_js_permissions_button_set__"></a>
+        <button type="button" id="exportBackupBtn" class="btn" data-i18n="__MSG_js_permissions_button_export__"></button>
+        <button type="button" id="setFilePermissiosnBtn" class="btn" data-i18n="__MSG_js_permissions_button_set__"></button>
       </div>
     </div>
 

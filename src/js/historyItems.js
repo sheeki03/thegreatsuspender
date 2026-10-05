@@ -1,260 +1,50 @@
-/*global chrome, gsSession, gsUtils, gsFavicon */
-// eslint-disable-next-line no-unused-vars
-var historyItems = (function(global) {
+/* global chrome, workbenchClient, legacyUi */
+var historyItems = (function() {
   'use strict';
-
-  if (
-    !chrome.extension.getBackgroundPage() ||
-    !chrome.extension.getBackgroundPage().tgs
-  ) {
-    return;
-  }
-  chrome.extension.getBackgroundPage().tgs.setViewGlobals(global);
-
-  function createSessionHtml(session, showLinks) {
-    session.windows = session.windows || [];
-
-    var sessionType =
-        session.sessionId === gsSession.getSessionId()
-          ? 'current'
-          : session.name
-            ? 'saved'
-            : 'recent',
-      sessionContainer,
-      sessionTitle,
-      sessionSave,
-      sessionDelete,
-      sessionExport,
-      sessionDiv,
-      sessionIcon,
-      windowResuspend,
-      windowReload,
-      titleText,
-      winCnt = session.windows.length,
-      tabCnt = session.windows.reduce(function(a, b) {
-        return a + b.tabs.length;
-      }, 0);
-
-    if (sessionType === 'saved') {
-      titleText = session.name;
-    } else {
-      titleText = gsUtils.getHumanDate(session.date);
-    }
-    titleText +=
-      '&nbsp;&nbsp;<small>(' +
-      winCnt +
-      pluralise(
-        ' ' + chrome.i18n.getMessage('js_history_window').toLowerCase(),
-        winCnt
-      ) +
-      ', ' +
-      tabCnt +
-      pluralise(
-        ' ' + chrome.i18n.getMessage('js_history_tab').toLowerCase(),
-        tabCnt
-      ) +
-      ')</small>';
-
-    sessionIcon = createEl('i', {
-      class: 'sessionIcon icon icon-plus-squared-alt',
-    });
-
-    sessionDiv = createEl('div', {
-      class: 'sessionContents',
-    });
-
-    sessionTitle = createEl('span', {
-      class: 'sessionLink',
-    });
-    sessionTitle.innerHTML = titleText;
-
-    sessionSave = createEl(
-      'a',
-      {
-        class: 'groupLink saveLink',
-        href: '#',
-      },
-      chrome.i18n.getMessage('js_history_save')
-    );
-
-    sessionDelete = createEl(
-      'a',
-      {
-        class: 'groupLink deleteLink',
-        href: '#',
-      },
-      chrome.i18n.getMessage('js_history_delete')
-    );
-
-    windowResuspend = createEl(
-      'a',
-      {
-        class: 'groupLink resuspendLink',
-        href: '#',
-      },
-      chrome.i18n.getMessage('js_history_resuspend')
-    );
-
-    windowReload = createEl(
-      'a',
-      {
-        class: 'groupLink reloadLink',
-        href: '#',
-      },
-      chrome.i18n.getMessage('js_history_reload')
-    );
-
-    sessionExport = createEl(
-      'a',
-      {
-        class: 'groupLink exportLink',
-        href: '#',
-      },
-      chrome.i18n.getMessage('js_history_export')
-    );
-
-    sessionContainer = createEl('div', {
-      class: 'sessionContainer',
-    });
-    sessionContainer.appendChild(sessionIcon);
-    sessionContainer.appendChild(sessionTitle);
-    if (showLinks && sessionType !== 'current') {
-      sessionContainer.appendChild(windowResuspend);
-      sessionContainer.appendChild(windowReload);
-    }
-    if (showLinks) {
-      sessionContainer.appendChild(sessionExport);
-    }
-    if (showLinks && sessionType !== 'saved') {
-      sessionContainer.appendChild(sessionSave);
-    }
-    if (showLinks && sessionType !== 'current') {
-      sessionContainer.appendChild(sessionDelete);
-    }
-
-    sessionContainer.appendChild(sessionDiv);
-
-    return sessionContainer;
+  var C = workbenchClient, n = C.node;
+  function text(key) { return chrome.i18n.getMessage(key); }
+  function control(label, className, key) { return n('button', { type: 'button', class: className, text: label, 'data-focus-key': key }); }
+  function createSessionHtml(session, showLinks, currentSessionId) {
+    var windows = session.windows || [];
+    var type = session.sessionId === currentSessionId ? 'current' : session.name ? 'saved' : 'recent';
+    var key = 'session-' + session.sessionId;
+    var title = type === 'saved' ? session.name : new Date(session.date).toLocaleString();
+    var tabCount = windows.reduce(function(count, window) { return count + (window.tabs || []).length; }, 0);
+    var plural = text('js_history_plural');
+    var count = windows.length + ' ' + text('js_history_window').toLowerCase() + (windows.length === 1 ? '' : plural) + ', ' + tabCount + ' ' + text('js_history_tab').toLowerCase() + (tabCount === 1 ? '' : plural);
+    var container = n('div', { class: 'sessionContainer', 'data-session-id': session.sessionId });
+    var contents = n('div', { class: 'sessionContents', id: key + '-contents', hidden: true });
+    var icon = control('', 'sessionIcon icon icon-plus-squared-alt', key + '-toggle-icon');
+    icon.setAttribute('aria-label', 'Expand ' + title); icon.setAttribute('aria-expanded', 'false'); icon.setAttribute('aria-controls', contents.id);
+    var heading = control(title, 'sessionLink', key + '-toggle');
+    heading.setAttribute('aria-expanded', 'false'); heading.setAttribute('aria-controls', contents.id);
+    heading.appendChild(n('small', { class: 'session-count', text: ' (' + count + ')' }));
+    container.append(icon, heading);
+    if (showLinks && type !== 'current') container.append(control(text('js_history_resuspend'), 'groupLink resuspendLink', key + '-sleep'), control(text('js_history_reload'), 'groupLink reloadLink', key + '-restore'));
+    if (showLinks) container.appendChild(control(text('js_history_export'), 'groupLink exportLink', key + '-export'));
+    if (showLinks && type !== 'saved') container.appendChild(control(text('js_history_save'), 'groupLink saveLink', key + '-save'));
+    if (showLinks && type === 'saved') container.appendChild(control('Rename', 'groupLink renameLink', key + '-rename'));
+    if (showLinks && type !== 'current') container.appendChild(control(text('js_history_delete'), 'groupLink deleteLink', key + '-delete'));
+    container.appendChild(contents);
+    return container;
   }
 
   function createWindowHtml(window, index, showLinks) {
-    var groupHeading, windowContainer, groupUnsuspendCurrent, groupUnsuspendNew;
-
-    groupHeading = createEl('div', {
-      class: 'windowContainer',
-    });
-
-    var windowString = chrome.i18n.getMessage('js_history_window');
-    windowContainer = createEl(
-      'span',
-      {},
-      windowString + ' ' + (index + 1) + ':\u00A0'
-    );
-
-    groupUnsuspendCurrent = createEl(
-      'a',
-      {
-        class: 'groupLink resuspendLink ',
-        href: '#',
-      },
-      chrome.i18n.getMessage('js_history_resuspend')
-    );
-
-    groupUnsuspendNew = createEl(
-      'a',
-      {
-        class: 'groupLink reloadLink',
-        href: '#',
-      },
-      chrome.i18n.getMessage('js_history_reload')
-    );
-
-    groupHeading.appendChild(windowContainer);
-    if (showLinks) {
-      groupHeading.appendChild(groupUnsuspendCurrent);
-      groupHeading.appendChild(groupUnsuspendNew);
-    }
-
-    return groupHeading;
+    var key = 'session-' + window.sessionId + '-window-' + window.id;
+    var container = n('div', { class: 'windowContainer' }, [n('span', { text: text('js_history_window') + ' ' + (index + 1) + ': ' })]);
+    if (showLinks) container.append(control(text('js_history_resuspend'), 'groupLink resuspendLink', key + '-sleep'), control(text('js_history_reload'), 'groupLink reloadLink', key + '-restore'));
+    return container;
   }
 
-  async function createTabHtml(tab, showLinks) {
-    var linksSpan, listImg, listLink, listHover;
-
-    if (tab.sessionId) {
-      linksSpan = createEl('div', {
-        class: 'tabContainer',
-        'data-tabId': tab.id || tab.url,
-        'data-url': tab.url,
-      });
-    } else {
-      linksSpan = createEl('div', {
-        class: 'tabContainer',
-        'data-url': tab.url,
-      });
-    }
-
-    listHover = createEl(
-      'span',
-      {
-        class: 'itemHover removeLink',
-      },
-      '\u2716'
-    );
-
-    const faviconMeta = await gsFavicon.getFaviconMetaData(tab);
-    const favIconUrl = faviconMeta.normalisedDataUrl;
-    listImg = createEl('img', {
-      src: favIconUrl,
-      height: '16px',
-      width: '16px',
-    });
-
-    listLink = createEl(
-      'a',
-      {
-        class: 'historyLink',
-        href: tab.url,
-        target: '_blank',
-      },
-      tab.title && tab.title.length > 1 ? tab.title : tab.url
-    );
-
-    if (showLinks) {
-      linksSpan.appendChild(listHover);
-    }
-    linksSpan.appendChild(listImg);
-    linksSpan.appendChild(listLink);
-    linksSpan.appendChild(createEl('br'));
-
-    return linksSpan;
+  function createTabHtml(tab, showLinks) {
+    var url = tab.originalUrl || tab.url;
+    var key = 'session-' + (tab.sessionId || 'recovery') + '-window-' + tab.windowId + '-tab-' + tab.id;
+    var container = n('div', { class: 'tabContainer', 'data-tab-id': tab.id, 'data-url': url });
+    if (showLinks) container.appendChild(control('Remove', 'itemHover removeLink', key + '-remove'));
+    container.appendChild(n('img', { src: legacyUi.imageSource(tab.favIconUrl) || legacyUi.favicon(url), height: '16', width: '16', alt: '', loading: 'lazy' }));
+    var link = legacyUi.href(url);
+    container.appendChild(n(link ? 'a' : 'span', { class: 'historyLink', href: link, target: link ? '_blank' : null, rel: link ? 'noopener' : null, text: tab.title || url, title: url, 'data-focus-key': key + '-open' }));
+    return container;
   }
-
-  function createEl(elType, attributes, text) {
-    var el = document.createElement(elType);
-    attributes = attributes || {};
-    el = setElAttributes(el, attributes);
-    el.innerHTML = gsUtils.htmlEncode(text || '');
-    return el;
-  }
-  function setElAttributes(el, attributes) {
-    for (var key in attributes) {
-      if (attributes.hasOwnProperty(key)) {
-        el.setAttribute(key, attributes[key]);
-      }
-    }
-    return el;
-  }
-
-  function pluralise(text, count) {
-    return (
-      text + (count > 1 ? chrome.i18n.getMessage('js_history_plural') : '')
-    );
-  }
-
-  return {
-    createSessionHtml: createSessionHtml,
-    createWindowHtml: createWindowHtml,
-    createTabHtml: createTabHtml,
-  };
-})(this);
+  return { createSessionHtml: createSessionHtml, createWindowHtml: createWindowHtml, createTabHtml: createTabHtml };
+})();

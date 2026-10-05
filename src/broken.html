@@ -2,8 +2,13 @@
 <html>
 
 <head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <link type="text/css" href="css/style.css" rel="stylesheet">
-  <script type="text/javascript" src="js/broken.js"></script>
+  <link type="text/css" href="css/legacyPages.css" rel="stylesheet">
+  <script defer src="js/workbenchClient.js"></script>
+  <script defer src="js/legacyUi.js"></script>
+  <script defer src="js/broken.js"></script>
   <title id="gsTitle">The Great Suspender is broken</title>
 
 </head>
@@ -18,7 +23,7 @@
       <h1>Ruh Roh!</h1>
       <p>The Great Suspender failed to start. Perhaps you are using an incompatible version of chrome?</p>
       <p>Try to restart the extension. If the problem persists, ask for help on the <a href="https://github.com/greatsuspender/thegreatsuspender/issues">GitHub project page</a>.</p>
-      <p>You can recover lost tabs from the <a id="sessionManagementLink" href="#">session management page</a>.</p>
+      <p>You can recover lost tabs from the <a id="sessionManagementLink" href="history.html">session management page</a>.</p>
       <hr />
       <button id="restartExtension" class="btn">Restart extension</button>
     </div>

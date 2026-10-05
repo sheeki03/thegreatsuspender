@@ -1,4 +1,4 @@
-/*global chrome, gsSession, localStorage, gsUtils */
+/*global gsBrowser, gsSession, localStorage, gsUtils */
 'use strict';
 
 // Used to keep track of which settings were defined in the managed storage
@@ -73,10 +73,14 @@ var gsStorage = {
 
   //populate localstorage settings with sync settings where undefined
   initSettingsAsPromised: function() {
-    return new Promise(function(resolve) {
+    return new Promise(function(resolve, reject) {
       var defaultSettings = gsStorage.getSettingsDefaults();
       var defaultKeys = Object.keys(defaultSettings);
-      chrome.storage.sync.get(defaultKeys, function(syncedSettings) {
+      gsBrowser.storage.sync.get(defaultKeys, function(syncedSettings) {
+        if (gsBrowser.runtime.lastError) {
+          reject(new Error(gsBrowser.runtime.lastError.message));
+          return;
+        }
         gsUtils.log('gsStorage', 'syncedSettings on init: ', syncedSettings);
         gsSession.setSynchedSettingsOnInit(syncedSettings);
 
@@ -104,7 +108,7 @@ var gsStorage = {
         var mergedSettings = {};
         for (const key of defaultKeys) {
           if (key === gsStorage.SYNC_SETTINGS) {
-            if (chrome.extension.inIncognitoContext) {
+            if (gsBrowser.extension.inIncognitoContext) {
               mergedSettings[key] = false;
             } else {
               mergedSettings[key] = rawLocalSettings.hasOwnProperty(key)
@@ -181,32 +185,27 @@ var gsStorage = {
    */
   checkManagedStorageAndOverride() {
     const settingsList = Object.keys(gsStorageSettings);
-    chrome.storage.managed.get(settingsList, result => {
-      const settings = gsStorage.getSettings();
-
-      Object.keys(result).forEach(key => {
-        if (key === 'WHITELIST') {
-          settings[gsStorage[key]] = result[key].replace(/[\s\n]+/g, '\n');
-        } else {
-          settings[gsStorage[key]] = result[key];
+    return new Promise((resolve, reject) => {
+      gsBrowser.storage.managed.get(settingsList, result => {
+        if (gsBrowser.runtime.lastError) {
+          reject(new Error(gsBrowser.runtime.lastError.message));
+          return;
         }
-
-        // Mark option as managed
-        managedOptions.push(gsStorage[key]);
+        const settings = gsStorage.getSettings();
+        for (const key of Object.keys(result)) {
+          settings[gsStorage[key]] = key === 'WHITELIST'
+            ? result[key].replace(/[\s\n]+/g, '\n') : result[key];
+          if (!managedOptions.includes(gsStorage[key])) managedOptions.push(gsStorage[key]);
+        }
+        gsStorage.saveSettings(settings);
+        resolve();
       });
-
-      gsStorage.saveSettings(settings);
-      gsUtils.log(
-        'gsStorage',
-        'overrode settings with managed storage config:',
-        settings
-      );
     });
   },
 
   // Listen for changes to synced settings
   addSettingsSyncListener: function() {
-    chrome.storage.onChanged.addListener(function(remoteSettings, namespace) {
+    gsBrowser.storage.onChanged.addListener(function(remoteSettings, namespace) {
       if (namespace !== 'sync' || !remoteSettings) {
         return;
       }
@@ -321,12 +320,12 @@ var gsStorage = {
         'Pushing local settings to sync',
         settings
       );
-      chrome.storage.sync.set(settings, () => {
-        if (chrome.runtime.lastError) {
+      gsBrowser.storage.sync.set(settings, () => {
+        if (gsBrowser.runtime.lastError) {
           gsUtils.error(
             'gsStorage',
             'failed to save to chrome.storage.sync: ',
-            chrome.runtime.lastError
+            gsBrowser.runtime.lastError
           );
         }
       });

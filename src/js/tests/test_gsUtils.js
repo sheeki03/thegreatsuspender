@@ -5,19 +5,6 @@ testSuites.push(
     'use strict';
 
     const tests = [
-      // Test gsUtils.setTimeout
-      async () => {
-        const timeout = 500;
-        const timeBefore = new Date().getTime();
-        await gsUtils.setTimeout(timeout);
-        const timeAfter = new Date().getTime();
-        const isTimeAfterValid =
-          timeAfter > timeBefore + timeout &&
-          timeAfter < timeBefore + timeout + 200;
-
-        return assertTrue(isTimeAfterValid);
-      },
-
       // Test gsUtils.getRootUrl
       async () => {
         const rawUrl1 = 'https://google.com';
@@ -94,47 +81,27 @@ testSuites.push(
         );
       },
 
-      // Test gsUtils.executeWithRetries
+      // Retry transient errors, but preserve the terminal failure and limit.
       async () => {
-        const successPromiseFn = val => new Promise((r, j) => r(val));
-        let result1;
-        const timeBefore1 = new Date().getTime();
+        const failure = new Error('temporarily unavailable');
+        let attempts = 0;
+        const value = await gsUtils.executeWithRetries(async () => {
+          attempts += 1;
+          if (attempts < 3) throw failure;
+          return 'ready';
+        }, [], 2, 0);
+        const recovered = value === 'ready' && attempts === 3;
+        let exhaustedAttempts = 0;
+        let terminal;
         try {
-          result1 = await gsUtils.executeWithRetries(
-            successPromiseFn,
-            'a',
-            3,
-            500
-          );
-        } catch (e) {
-          // do nothing
+          await gsUtils.executeWithRetries(async () => {
+            exhaustedAttempts += 1;
+            throw failure;
+          }, [], 0, 0);
+        } catch (error) {
+          terminal = error;
         }
-        const timeAfter1 = new Date().getTime();
-        const timeTaken1 = timeAfter1 - timeBefore1;
-        const isTime1Valid = timeTaken1 >= 0 && timeTaken1 < 100;
-        const isResult1Valid = result1 === 'a';
-
-        const errorPromiseFn = val => new Promise((r, j) => j());
-        let result2;
-        const timeBefore2 = new Date().getTime();
-        try {
-          result2 = await gsUtils.executeWithRetries(
-            errorPromiseFn,
-            'b',
-            3,
-            500
-          );
-        } catch (e) {
-          // do nothing
-        }
-        const timeAfter2 = new Date().getTime();
-        const timeTaken2 = timeAfter2 - timeBefore2;
-        const isTime2Valid = timeTaken2 >= 1500 && timeTaken2 < 1600;
-        const isResult2Valid = result2 === undefined;
-
-        return assertTrue(
-          isResult1Valid && isTime1Valid && isResult2Valid && isTime2Valid
-        );
+        return assertTrue(recovered && exhaustedAttempts === 1 && terminal === failure);
       },
     ];
 

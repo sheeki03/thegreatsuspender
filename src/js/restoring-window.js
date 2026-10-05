@@ -1,16 +1,5 @@
-/*global chrome, gsUtils */
-(function(global) {
+/* global legacyUi */
+(function() {
   'use strict';
-
-  try {
-    chrome.extension.getBackgroundPage().tgs.setViewGlobals(global);
-  } catch (e) {
-    window.setTimeout(() => window.location.reload(), 1000);
-    return;
-  }
-
-  gsUtils.documentReadyAndLocalisedAsPromsied(document).then(function() {
-    //do nothing
-  });
-
-})(this);
+  legacyUi.start(function() { document.querySelector('.splash').setAttribute('role', 'status'); });
+})();

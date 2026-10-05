@@ -1,4 +1,4 @@
-/*global chrome, localStorage, tgs, gsUtils, gsChrome, GsTabQueue, gsStorage, gsTabSuspendManager */
+/*global gsBrowser, localStorage, tgs, gsUtils, gsChrome, GsTabQueue, gsStorage, gsTabSuspendManager */
 // eslint-disable-next-line no-unused-vars
 var gsTabDiscardManager = (function() {
   'use strict';
@@ -89,10 +89,21 @@ var gsTabDiscardManager = (function() {
       resolve(false);
       return;
     }
+    if (executionProps.beforeDiscard) {
+      try {
+        if (!(await executionProps.beforeDiscard(tab))) {
+          resolve(false);
+          return;
+        }
+      } catch (error) {
+        reject(error);
+        return;
+      }
+    }
     gsUtils.log(tab.id, QUEUE_ID, 'Forcing discarding of tab.');
-    chrome.tabs.discard(tab.id, () => {
-      if (chrome.runtime.lastError) {
-        gsUtils.warning(tab.id, QUEUE_ID, chrome.runtime.lastError);
+    gsBrowser.tabs.discard(tab.id, () => {
+      if (gsBrowser.runtime.lastError) {
+        gsUtils.warning(tab.id, QUEUE_ID, gsBrowser.runtime.lastError);
         resolve(false);
       } else {
         resolve(true);

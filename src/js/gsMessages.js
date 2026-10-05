@@ -1,4 +1,4 @@
-/*global gsUtils, gsStorage */
+/*global gsBrowser, gsUtils, gsStorage */
 // eslint-disable-next-line no-unused-vars
 var gsMessages = {
   INFO: 'info',
@@ -36,7 +36,7 @@ var gsMessages = {
       return;
     }
 
-    const ignoreForms = gsStorage.getOption(gsStorage.IGNORE_FORMS);
+    const ignoreForms = gsUtils.getSuspensionPolicy(tab).ignoreForms;
     gsMessages.sendMessageToContentScript(
       tab.id,
       { ignoreForms },
@@ -108,47 +108,41 @@ var gsMessages = {
     }
     var responseHandler = function(response) {
       gsUtils.log(tabId, 'response from tab', response);
-      if (chrome.runtime.lastError) {
-        if (callback) callback(chrome.runtime.lastError);
+      if (gsBrowser.runtime.lastError) {
+        if (callback) callback(gsBrowser.runtime.lastError);
       } else {
         if (callback) callback(null, response);
       }
     };
 
     message.tabId = tabId;
-    try {
-      gsUtils.log(tabId, 'send message to tab', message);
-      chrome.tabs.sendMessage(tabId, message, { frameId: 0 }, responseHandler);
-    } catch (e) {
-      // gsUtils.error(tabId, e);
-      chrome.tabs.sendMessage(tabId, message, responseHandler);
-    }
+    gsUtils.log(tabId, 'send message to tab', message);
+    gsBrowser.tabs.sendMessage(tabId, message, { frameId: 0 }, responseHandler);
   },
 
-  executeScriptOnTab: function(tabId, scriptPath, callback) {
-    if (!tabId) {
-      if (callback) callback('tabId not specified');
+  injectFileOnTab: function(tabId, scriptPath, callback) {
+    if (!Number.isInteger(tabId)) {
+      if (callback) callback(new Error('tabId not specified'));
       return;
     }
-    chrome.tabs.executeScript(tabId, { file: scriptPath }, function(response) {
-      if (chrome.runtime.lastError) {
-        if (callback) callback(chrome.runtime.lastError);
-      } else {
-        if (callback) callback(null, response);
+    gsBrowser.scripting.executeScript({
+      target: { tabId },
+      files: [scriptPath],
+    }, results => {
+      if (gsBrowser.runtime.lastError) {
+        if (callback) callback(gsBrowser.runtime.lastError);
+      } else if (callback) {
+        callback(null, results);
       }
     });
   },
 
-  executeCodeOnTab: function(tabId, codeString, callback) {
-    if (!tabId) {
-      if (callback) callback('tabId not specified');
-      return;
-    }
-    chrome.tabs.executeScript(tabId, { code: codeString }, function(response) {
-      if (chrome.runtime.lastError) {
-        if (callback) callback(chrome.runtime.lastError);
-      } else {
-        if (callback) callback(null, response);
+  runJobOnTab: function(tabId, job, args, callback) {
+    gsBrowser.runScriptJob({ target: { tabId }, job, args }, results => {
+      if (gsBrowser.runtime.lastError) {
+        if (callback) callback(gsBrowser.runtime.lastError);
+      } else if (callback) {
+        callback(null, results);
       }
     });
   },

@@ -1,175 +1,61 @@
-/*global chrome, historyItems, gsMessages, gsSession, gsStorage, gsIndexedDb, gsChrome, gsUtils */
-(function(global) {
+/* global chrome, workbenchClient, legacyUi, historyItems */
+(function() {
   'use strict';
-
-  try {
-    chrome.extension.getBackgroundPage().tgs.setViewGlobals(global);
-  } catch (e) {
-    window.setTimeout(() => window.location.reload(), 1000);
-    return;
-  }
-
-  var restoreAttempted = false;
-  var tabsToRecover = [];
-
-  async function getRecoverableTabs(currentTabs) {
-    const lastSession = await gsIndexedDb.fetchLastSession();
-    //check to see if they still exist in current session
-    if (lastSession) {
-      gsUtils.removeInternalUrlsFromSession(lastSession);
-      for (const window of lastSession.windows) {
-        for (const tabProperties of window.tabs) {
-          if (gsUtils.isSuspendedTab(tabProperties)) {
-            var originalUrl = gsUtils.getOriginalUrl(tabProperties.url);
-            // Ignore suspended tabs from previous session that exist unsuspended now
-            const originalTab = currentTabs.find(o => o.url === originalUrl);
-            if (!originalTab) {
-              tabProperties.windowId = window.id;
-              tabProperties.sessionId = lastSession.sessionId;
-              tabsToRecover.push(tabProperties);
-            }
-          }
-        }
-      }
-      return tabsToRecover;
-    }
-  }
-
-  function removeTabFromList(tabToRemove) {
-    const recoveryTabsEl = document.getElementById('recoveryTabs');
-    const childLinks = recoveryTabsEl.children;
-
-    for (var i = 0; i < childLinks.length; i++) {
-      const element = childLinks[i];
-      const url = tabToRemove.url || tabToRemove.pendingUrl;
-      const originalUrl = gsUtils.isSuspendedUrl(url)
-        ? gsUtils.getOriginalUrl(url)
-        : url;
-
-      if (
-        element.getAttribute('data-url') === originalUrl ||
-        element.getAttribute('data-tabId') == tabToRemove.id
-      ) {
-        // eslint-disable-line eqeqeq
-        recoveryTabsEl.removeChild(element);
-      }
-    }
-
-    //if removing the last element.. (re-get the element this function gets called asynchronously
-    if (document.getElementById('recoveryTabs').children.length === 0) {
-      //if we have already clicked the restore button then redirect to success page
-      if (restoreAttempted) {
-        document.getElementById('suspendy-guy-inprogress').style.display =
-          'none';
-        document.getElementById('recovery-inprogress').style.display = 'none';
-        document.getElementById('suspendy-guy-complete').style.display =
-          'inline-block';
-        document.getElementById('recovery-complete').style.display =
-          'inline-block';
-
-        //otherwise we have no tabs to recover so just hide references to recovery
-      } else {
-        hideRecoverySection();
-      }
-    }
-  }
-
-  function showTabSpinners() {
-    var recoveryTabsEl = document.getElementById('recoveryTabs'),
-      childLinks = recoveryTabsEl.children;
-
-    for (var i = 0; i < childLinks.length; i++) {
-      var tabContainerEl = childLinks[i];
-      tabContainerEl.removeChild(tabContainerEl.firstChild);
-      var spinnerEl = document.createElement('span');
-      spinnerEl.classList.add('faviconSpinner');
-      tabContainerEl.insertBefore(spinnerEl, tabContainerEl.firstChild);
-    }
-  }
-
-  function hideRecoverySection() {
-    var recoverySectionEls = document.getElementsByClassName('recoverySection');
-    for (var i = 0; i < recoverySectionEls.length; i++) {
-      recoverySectionEls[i].style.display = 'none';
-    }
-    document.getElementById('restoreSession').style.display = 'none';
-  }
-
-  gsUtils.documentReadyAndLocalisedAsPromsied(document).then(async function() {
-    var restoreEl = document.getElementById('restoreSession'),
-      manageEl = document.getElementById('manageManuallyLink'),
-      previewsEl = document.getElementById('previewsOffBtn'),
-      recoveryEl = document.getElementById('recoveryTabs'),
-      warningEl = document.getElementById('screenCaptureNotice'),
-      tabEl;
-
-    manageEl.onclick = function(e) {
-      e.preventDefault();
-      chrome.tabs.create({ url: chrome.extension.getURL('history.html') });
-    };
-
-    if (previewsEl) {
-      previewsEl.onclick = function(e) {
-        gsStorage.setOptionAndSync(gsStorage.SCREEN_CAPTURE, '0');
-        window.location.reload();
-      };
-
-      //show warning if screen capturing turned on
-      if (gsStorage.getOption(gsStorage.SCREEN_CAPTURE) !== '0') {
-        warningEl.style.display = 'block';
-      }
-    }
-
-    var performRestore = async function() {
-      restoreAttempted = true;
-      restoreEl.className += ' btnDisabled';
-      restoreEl.removeEventListener('click', performRestore);
-      showTabSpinners();
-      while (gsSession.isInitialising()) {
-        await gsUtils.setTimeout(200);
-      }
-      await gsSession.recoverLostTabs();
-    };
-
-    restoreEl.addEventListener('click', performRestore);
-
-    const currentTabs = await gsChrome.tabsQuery();
-    const tabsToRecover = await getRecoverableTabs(currentTabs);
-    if (tabsToRecover.length === 0) {
-      hideRecoverySection();
-      return;
-    }
-
-    for (var tabToRecover of tabsToRecover) {
-      tabToRecover.title = gsUtils.getCleanTabTitle(tabToRecover);
-      tabToRecover.url = gsUtils.getOriginalUrl(tabToRecover.url);
-      tabEl = await historyItems.createTabHtml(tabToRecover, false);
-      tabEl.onclick = function() {
-        return function(e) {
-          e.preventDefault();
-          chrome.tabs.create({ url: tabToRecover.url, active: false });
-          removeTabFromList(tabToRecover);
-        };
-      };
-      recoveryEl.appendChild(tabEl);
-    }
-
-    var currentSuspendedTabs = currentTabs.filter(o =>
-      gsUtils.isSuspendedTab(o)
-    );
-    for (const suspendedTab of currentSuspendedTabs) {
-      gsMessages.sendPingToTab(suspendedTab.id, function(error) {
-        if (error) {
-          gsUtils.warning(suspendedTab.id, 'Failed to sendPingToTab', error);
-        } else {
-          removeTabFromList(suspendedTab);
-        }
+  var C = workbenchClient, attempted = false, busy = false, loading = false;
+  var restore, list;
+  async function refresh() {
+    if (busy || loading) return;
+    loading = true;
+    var focus = legacyUi.focusKey(document.activeElement);
+    try {
+      var info = await C.request('legacy.recovery.get');
+      document.getElementById('screenCaptureNotice').style.display = info.screenCapture === '0' ? 'none' : 'block';
+      list.replaceChildren();
+      info.tabs.forEach(function(tab) {
+        var row = historyItems.createTabHtml(tab, false);
+        var link = row.querySelector('.historyLink');
+        legacyUi.bind(link, async function() {
+          busy = true;
+          legacyUi.status('Restoring ' + (tab.title || tab.originalUrl || tab.url) + '…');
+          try {
+            var result = await C.request('legacy.recovery.restore', { sessionId: tab.sessionId, windowId: tab.windowId, tabId: tab.id });
+            attempted = true;
+            C.renderResult(document.getElementById('recovery-result'), result, 'Tab restored.');
+          } finally { busy = false; await refresh(); }
+        });
+        list.appendChild(row);
       });
-    }
+      restore.disabled = !info.tabs.length;
+      document.querySelector('.recoverySection').hidden = !info.tabs.length;
+      restore.hidden = !info.tabs.length;
+      if (!info.tabs.length && attempted) {
+        document.getElementById('suspendy-guy-inprogress').hidden = true;
+        document.getElementById('recovery-inprogress').hidden = true;
+        document.getElementById('suspendy-guy-complete').classList.remove('reallyHidden');
+        document.getElementById('recovery-complete').classList.remove('reallyHidden');
+        legacyUi.status('All recoverable tabs are open.', 'success');
+      } else if (!info.tabs.length) legacyUi.status('No lost suspended tabs need recovery. Saved and recent sessions are still available in the session manager.');
+      legacyUi.restoreFocus(focus);
+    } catch (error) { legacyUi.error(error); }
+    finally { loading = false; }
+  }
+
+  legacyUi.start(async function() {
+    restore = document.getElementById('restoreSession'); list = document.getElementById('recoveryTabs');
+    document.querySelector('.splash > div:last-child').appendChild(C.node('div', { id: 'recovery-result', role: 'status', 'aria-live': 'polite', hidden: true }));
+    legacyUi.bind(document.getElementById('manageManuallyLink'), function() { return C.openPage('history.html'); });
+    legacyUi.bind(document.getElementById('previewsOffBtn'), async function() { await C.request('legacy.update', { settings: { screenCapture: '0' } }); await refresh(); });
+    legacyUi.bind(restore, async function() {
+      busy = true; attempted = true;
+      legacyUi.status('Restoring lost tabs. Keep this page open until the recovery completes.');
+      list.querySelectorAll('img').forEach(function(image) { image.replaceWith(C.node('span', { class: 'faviconSpinner', 'aria-label': 'Restoring tab' })); });
+      try {
+        var result = await C.request('legacy.recovery.restore');
+        C.renderResult(document.getElementById('recovery-result'), result, 'Recovery finished.');
+      } finally { busy = false; await refresh(); }
+    });
+    chrome.runtime.onMessage.addListener(function(message, sender) { if (sender.id === chrome.runtime.id && message.action === 'legacy.recovery.changed') refresh(); });
+    C.subscribe(refresh);
+    await refresh();
   });
-
-  global.exports = {
-    removeTabFromList,
-  };
-
-})(this);
+})();

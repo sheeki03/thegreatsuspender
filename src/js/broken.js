@@ -1,32 +1,8 @@
-/*global chrome */
-(function(global) {
+/* global chrome, workbenchClient, legacyUi */
+(function() {
   'use strict';
-
-  try {
-    chrome.extension.getBackgroundPage().tgs.setViewGlobals(global);
-  } catch (e) {
-    window.setTimeout(() => window.location.reload(), 1000);
-    return;
-  }
-
-  function init() {
-    document
-      .getElementById('restartExtension')
-      .addEventListener('click', function() {
-        chrome.runtime.reload();
-      });
-    document
-      .getElementById('sessionManagementLink')
-      .addEventListener('click', function() {
-        chrome.tabs.create({ url: chrome.extension.getURL('history.html') });
-      });
-
-  }
-  if (document.readyState !== 'loading') {
-    init();
-  } else {
-    document.addEventListener('DOMContentLoaded', function() {
-      init();
-    });
-  }
-})(this);
+  legacyUi.start(function() {
+    legacyUi.bind(document.getElementById('restartExtension'), function() { chrome.runtime.reload(); });
+    legacyUi.bind(document.getElementById('sessionManagementLink'), function() { return workbenchClient.openPage('history.html'); });
+  });
+})();

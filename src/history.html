@@ -2,11 +2,16 @@
 <html>
 
 <head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <link type="text/css" href="css/fontello.css" rel="stylesheet">
-  <link type="text/css" href="css/style.css" rel="stylesheet"></link>
-  <script type="text/javascript" src="js/historyItems.js"></script>
-  <script type="text/javascript" src="js/historyUtils.js"></script>
-  <script type="text/javascript" src="js/history.js"></script>
+  <link type="text/css" href="css/style.css" rel="stylesheet">
+  <link type="text/css" href="css/legacyPages.css" rel="stylesheet">
+  <script defer src="js/workbenchClient.js"></script>
+  <script defer src="js/legacyUi.js"></script>
+  <script defer src="js/historyItems.js"></script>
+  <script defer src="js/historyUtils.js"></script>
+  <script defer src="js/history.js"></script>
   <title id='gsTitle' data-i18n="__MSG_ext_extension_name__ - __MSG_html_history_title__"></title>
 
 </head>
@@ -46,8 +51,8 @@
       <h2 data-i18n="__MSG_html_history_saved_sessions__:"></h2>
       <div id='historySessions' class="sessionsContainer"></div>
 
-      <a href="#" id="importSession" class="btn" data-i18n="__MSG_html_history_import_session__"></a>
-      <input type="file" id="importSessionAction" hidden />
+      <button type="button" id="importSession" class="btn" data-i18n="__MSG_html_history_import_session__"></button>
+      <input type="file" id="importSessionAction" accept=".txt,text/plain" aria-label="Import session text file" hidden />
     </div>
 
   </div>

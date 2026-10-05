@@ -1,4 +1,4 @@
-/*global chrome, db, tgs, gsUtils, gsChrome, gsSession */
+/*global gsBrowser, db, tgs, gsUtils, gsChrome, gsSession */
 'use strict';
 
 var gsIndexedDb = {
@@ -238,6 +238,7 @@ var gsIndexedDb = {
       }
     } catch (e) {
       gsUtils.error('gsIndexedDb', e);
+      throw e;
     }
   },
 
@@ -252,7 +253,7 @@ var gsIndexedDb = {
         .execute();
     } catch (e) {
       gsUtils.error('gsIndexedDb', e);
-      results = [];
+      throw e;
     }
     return results;
   },
@@ -286,6 +287,7 @@ var gsIndexedDb = {
       }
     } catch (e) {
       gsUtils.error('gsIndexedDb', e);
+      throw e;
     }
     if (results && results.length > 0) {
       return results[0];
@@ -302,7 +304,7 @@ var gsIndexedDb = {
       await gsIndexedDb.updateSession(existingSessionRestorePoint);
       gsUtils.log('gsIndexedDb', 'Updated automatic session restore point');
     } else {
-      session.name = chrome.i18n.getMessage('js_session_save_point') + version;
+      session.name = gsBrowser.i18n.getMessage('js_session_save_point') + version;
       session[gsIndexedDb.DB_SESSION_PRE_UPGRADE_KEY] = version;
       await gsIndexedDb.addToSavedSessions(session);
       gsUtils.log('gsIndexedDb', 'Created automatic session restore point');
@@ -349,6 +351,7 @@ var gsIndexedDb = {
         .execute();
     } catch (e) {
       gsUtils.error('gsIndexedDb', e);
+      throw e;
     }
     if (results && results.length > 0) {
       //don't want to match on current session
@@ -369,7 +372,7 @@ var gsIndexedDb = {
         .execute();
     } catch (e) {
       gsUtils.error('gsIndexedDb', e);
-      results = [];
+      throw e;
     }
     return results;
   },
@@ -397,34 +400,18 @@ var gsIndexedDb = {
   },
 
   removeTabFromSessionHistory: async function(sessionId, windowId, tabId) {
-    const gsSession = await gsIndexedDb.fetchSessionBySessionId(sessionId);
-    gsSession.windows.some(function(curWindow, windowIndex) {
-      const matched = curWindow.tabs.some(function(curTab, tabIndex) {
-        //leave this as a loose matching as sometimes it is comparing strings. other times ints
-        if (curTab.id == tabId || curTab.url == tabId) {
-          // eslint-disable-line eqeqeq
-          curWindow.tabs.splice(tabIndex, 1);
-          return true;
-        }
-      });
-      if (matched) {
-        //remove window if it no longer contains any tabs
-        if (curWindow.tabs.length === 0) {
-          gsSession.windows.splice(windowIndex, 1);
-        }
-        return true;
-      }
-    });
-
-    //update session
-    if (gsSession.windows.length > 0) {
-      await gsIndexedDb.updateSession(gsSession);
-      //or remove session if it no longer contains any windows
-    } else {
-      await gsIndexedDb.removeSessionFromHistory(sessionId);
-    }
-    const updatedSession = await gsIndexedDb.fetchSessionBySessionId(sessionId);
-    return updatedSession;
+    const session = await gsIndexedDb.fetchSessionBySessionId(sessionId);
+    if (!session) return null;
+    const windowIndex = session.windows.findIndex(window => String(window.id) === String(windowId));
+    if (windowIndex < 0) throw new Error('Session window no longer exists');
+    const window = session.windows[windowIndex];
+    const tabIndex = window.tabs.findIndex(tab => String(tab.id) === String(tabId) || tab.url === tabId);
+    if (tabIndex < 0) throw new Error('Recorded tab no longer exists');
+    window.tabs.splice(tabIndex, 1);
+    if (!window.tabs.length) session.windows.splice(windowIndex, 1);
+    if (session.windows.length) await gsIndexedDb.updateSession(session);
+    else await gsIndexedDb.removeSessionFromHistory(sessionId);
+    return gsIndexedDb.fetchSessionBySessionId(sessionId);
   },
 
   removeSessionFromHistory: async function(sessionId) {
@@ -445,6 +432,7 @@ var gsIndexedDb = {
       }
     } catch (e) {
       gsUtils.error('gsIndexedDb', e);
+      throw e;
     }
   },
 
@@ -528,7 +516,7 @@ var gsIndexedDb = {
   performMigration: async function(oldVersion) {
     try {
       const gsDb = await gsIndexedDb.getDb();
-      const extensionName = chrome.runtime.getManifest().name || '';
+      const extensionName = gsBrowser.runtime.getManifest().name || '';
 
       const major = parseInt(oldVersion.split('.')[0] || 0);
       const minor = parseInt(oldVersion.split('.')[1] || 0);

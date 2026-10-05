@@ -7,21 +7,25 @@ const FIXTURE_PREVIEW_URLS = 'previewUrls';
 
 const requiredLibs = [
   'db',
-  'gsSession',
-  'gsStorage',
   'gsUtils',
   'gsChrome',
-  'gsTabSuspendManager',
+  'gsStorage',
   'gsIndexedDb',
+  'gsMessages',
+  'gsSession',
   'gsTabQueue',
   'gsFavicon',
+  'gsCleanScreencaps',
+  'gsTabDiscardManager',
+  'gsTabSuspendManager',
 ];
 
 function loadJsFile(fileName) {
-  return new Promise(resolve => {
+  return new Promise((resolve, reject) => {
     const script = document.createElement('script');
     script.onload = resolve;
-    script.src = chrome.extension.getURL(`js/${fileName}.js`);
+    script.onerror = () => reject(new Error('Unable to load test dependency: ' + fileName));
+    script.src = chrome.runtime.getURL(`js/${fileName}.js`);
     document.head.appendChild(script);
   });
 }
@@ -31,7 +35,7 @@ function loadJsonFixture(fileName) {
     const request = new XMLHttpRequest();
     request.open(
       'GET',
-      chrome.extension.getURL(`js/tests/fixture_${fileName}.json`),
+      chrome.runtime.getURL(`js/tests/fixture_${fileName}.json`),
       true
     );
     request.onload = () => {
@@ -55,6 +59,8 @@ async function getFixture(fixtureName, itemName) {
 }
 
 async function runTests() {
+  await loadJsFile('injectionJobs');
+  await loadJsFile('tests/nativeBrowser');
   for (let testSuite of testSuites) {
     const resultEl = document.createElement('div');
     resultEl.innerHTML = `Testing ${testSuite.name}...`;
@@ -66,7 +72,7 @@ async function runTests() {
       console.log(`  Running test ${j + 1}..`);
 
       // loads/reset required libs
-      await Promise.all(requiredLibs.map(loadJsFile));
+      for (const file of requiredLibs) await loadJsFile(file);
 
       // clear indexedDb contents
       gsIndexedDb.DB_SERVER = 'tgsTest';

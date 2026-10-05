@@ -1,45 +1,24 @@
-/*global chrome, gsSession, gsUtils */
-(function(global) {
+/* global chrome, workbenchClient, legacyUi */
+(function() {
   'use strict';
-
-  try {
-    chrome.extension.getBackgroundPage().tgs.setViewGlobals(global);
-  } catch (e) {
-    window.setTimeout(() => window.location.reload(), 1000);
-    return;
+  var C = workbenchClient;
+  async function refresh() {
+    try {
+      var info = await C.request('legacy.info');
+      document.getElementById('patchMessage').hidden = info.updateType !== 'patch';
+      document.getElementById('minorUpdateDetail').hidden = info.updateType !== 'minor';
+      document.getElementById('majorUpdateDetail').hidden = info.updateType !== 'major';
+      document.getElementById('updateDetail').hidden = !['major', 'minor'].includes(info.updateType);
+      if (info.updated) {
+        document.getElementById('updating').hidden = true;
+        document.getElementById('updated').classList.remove('reallyHidden');
+      }
+    } catch (error) { legacyUi.error(error); }
   }
-
-  function toggleUpdated() {
-    document.getElementById('updating').style.display = 'none';
-    document.getElementById('updated').style.display = 'block';
-  }
-
-  gsUtils.documentReadyAndLocalisedAsPromsied(document).then(function() {
-    // var versionEl = document.getElementById('updatedVersion');
-    // versionEl.innerHTML = 'v' + chrome.runtime.getManifest().version;
-
-    document.getElementById('sessionManagerLink').onclick = function(e) {
-      e.preventDefault();
-      chrome.tabs.create({ url: chrome.extension.getURL('history.html') });
-    };
-
-    var updateType = gsSession.getUpdateType();
-    if (updateType === 'major') {
-      document.getElementById('patchMessage').style.display = 'none';
-      document.getElementById('minorUpdateDetail').style.display = 'none';
-    } else if (updateType === 'minor') {
-      document.getElementById('patchMessage').style.display = 'none';
-      document.getElementById('majorUpdateDetail').style.display = 'none';
-    } else {
-      document.getElementById('updateDetail').style.display = 'none';
-    }
-
-    if (gsSession.isUpdated()) {
-      toggleUpdated();
-    }
+  legacyUi.start(async function() {
+    legacyUi.bind(document.getElementById('sessionManagerLink'), function() { return C.openPage('history.html'); });
+    chrome.runtime.onMessage.addListener(function(message, sender) { if (sender.id === chrome.runtime.id && message.action === 'legacy.updated.changed') refresh(); });
+    C.subscribe(refresh);
+    await refresh();
   });
-
-  global.exports = {
-    toggleUpdated,
-  };
-})(this);
+})();
