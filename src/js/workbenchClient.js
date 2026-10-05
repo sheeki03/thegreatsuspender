@@ -96,9 +96,12 @@ var workbenchClient = (function() {
     return 'Until ended';
   }
 
+  // The chosen theme is remembered so the next page opens in it without a flash.
   function theme(value) {
     document.documentElement.dataset.theme = value || 'system';
+    try { localStorage.setItem('gsUiTheme', value || 'system'); } catch (error) { /* Optional. */ }
   }
+  try { document.documentElement.dataset.theme = localStorage.getItem('gsUiTheme') || 'system'; } catch (error) { /* Optional. */ }
 
   function subscribe(listener) {
     var timer;
@@ -140,16 +143,14 @@ var workbenchClient = (function() {
     if (result && typeof result.summary === 'string') return result.summary;
     var detail = collectResults(result);
     var parts = [];
-    if (detail.changed.length || result && Array.isArray(result.changed)) parts.push(detail.changed.length + ' tab' + (detail.changed.length === 1 ? '' : 's') + ' changed');
+    if (detail.changed.length) parts.push(detail.changed.length + ' tab' + (detail.changed.length === 1 ? '' : 's') + ' changed');
     if (result && Array.isArray(result.restored)) parts.push(result.restored.length + ' tabs restored');
-    if (result && Number.isFinite(result.imported)) parts.push(result.imported + ' bookmark URLs imported');
-    if (result && Number.isFinite(result.created)) parts.push(result.created + ' bookmarks created');
     if (detail.skipped.length) parts.push(detail.skipped.length + ' protected or unavailable tabs skipped');
     if (detail.errors.length) parts.push(detail.errors.length + ' errors');
     if (result && Array.isArray(result.scopes)) {
-      if (!result.scopes.length) parts.push('No enabled awake-tab scope is above its saved ceiling');
+      if (!result.scopes.length) parts.push('You are under your tab limit, so nothing needed to sleep');
       result.scopes.forEach(function(scope) {
-        parts.push((scope.workspaceId ? 'Workspace policy' : 'Browser policy') + ': ' + scope.before + ' → ' + scope.after + ' awake; target ' + scope.target + (scope.reachedTarget ? ' reached' : ' not reached because protected or unavailable tabs stayed awake'));
+        parts.push((scope.workspaceId ? 'Workspace limit' : 'Tab limit') + ': ' + scope.before + ' → ' + scope.after + ' awake' + (scope.reachedTarget ? '' : ' (some tabs are kept awake, so the target wasn’t reached)'));
       });
     }
     return parts.length ? parts.join('; ') + '.' : fallback || 'Saved.';
@@ -179,9 +180,14 @@ var workbenchClient = (function() {
       var dialog = node('dialog', { class: 'confirm-dialog', 'aria-labelledby': 'confirmation-title' });
       var title = node('h2', { id: 'confirmation-title', text: options.title });
       var cancel = button('Cancel', function() { finish(false); });
-      var accept = button(options.accept || 'Confirm', function() { finish(true); }, { class: options.destructive ? 'danger' : 'primary' });
-      dialog.append(title, node('p', { text: options.text }), node('div', { class: 'button-row' }, [cancel, accept]));
-      if (options.detail) dialog.insertBefore(options.detail, dialog.lastChild);
+      var accept = button(options.accept || 'Confirm', function() { finish(true); }, { class: options.destructive ? 'danger solid' : 'primary' });
+      var form = node('form', { method: 'dialog' });
+      form.addEventListener('submit', function(event) { event.preventDefault(); finish(true); });
+      form.append(title);
+      if (options.text) form.append(node('p', { text: options.text }));
+      if (options.detail) form.append(options.detail);
+      form.append(node('div', { class: 'button-row' }, [cancel, accept]));
+      dialog.append(form);
       function finish(value) {
         dialog.close();
         dialog.remove();
@@ -192,8 +198,40 @@ var workbenchClient = (function() {
       dialog.addEventListener('cancel', function(event) { event.preventDefault(); finish(false); });
       document.body.appendChild(dialog);
       dialog.showModal();
-      cancel.focus();
+      (options.focus || cancel).focus();
     });
+  }
+
+  // Plain-language versions of the engine's reasons a tab was left as it was.
+  var REASONS = {
+    'Unsaved form or editable content': 'You typed something that may not be saved',
+    'Always keep awake': 'This site is set to stay awake',
+    'Snoozed': 'Kept awake for now',
+    'Temporarily excluded': 'Paused with the keyboard shortcut',
+    'Page is still loading': 'Still loading',
+    'Playing audio': 'Playing audio',
+    'Pinned tab': 'Pinned',
+    'Active tab': 'You’re viewing it',
+    'Browser is offline': 'You’re offline',
+    'Computer is charging': 'Your computer is plugged in',
+    'Browser, private, or extension page': 'Browser pages can’t be suspended',
+    'tab-unavailable-or-excluded': 'This tab can’t be suspended'
+  };
+  function reasonText(reason) { return REASONS[reason] || reason; }
+
+  function favicon(url) {
+    return chrome.runtime.getURL('_favicon/') + '?pageUrl=' + encodeURIComponent(url || '') + '&size=32';
+  }
+
+  // Uses the page's inline <svg> sprite: <symbol id="i-NAME">.
+  function icon(name) {
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'icon');
+    svg.setAttribute('aria-hidden', 'true');
+    var use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    use.setAttribute('href', '#i-' + name);
+    svg.appendChild(use);
+    return svg;
   }
 
   async function openPage(path) {
@@ -215,5 +253,5 @@ var workbenchClient = (function() {
     }
   }
 
-  return { request: request, api: api, node: node, button: button, select: select, field: field, check: check, notice: notice, date: date, duration: duration, expiry: expiry, theme: theme, subscribe: subscribe, collectResults: collectResults, resultText: resultText, renderResult: renderResult, confirm: confirm, openPage: openPage, focusTab: focusTab, searchKeys: searchKeys };
+  return { request: request, api: api, node: node, button: button, select: select, field: field, check: check, notice: notice, date: date, duration: duration, expiry: expiry, theme: theme, subscribe: subscribe, collectResults: collectResults, resultText: resultText, renderResult: renderResult, confirm: confirm, openPage: openPage, focusTab: focusTab, searchKeys: searchKeys, favicon: favicon, icon: icon, reasonText: reasonText };
 })();
