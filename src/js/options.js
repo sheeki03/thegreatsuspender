@@ -1,255 +1,217 @@
-/* global chrome, workbenchClient, legacyUi */
+/* global workbenchClient */
 (function() {
   'use strict';
-  var C = workbenchClient, n = C.node, b = C.button;
-  var content = document.getElementById('settings-content'), notice = document.getElementById('settings-notice');
-  var data = null, legacyInfo = null, loading = false, built = false;
-  var forms = [], memoryStatus = null, memoryResult = null;
-  var suspendOptions = [['0', 'Never'], ['0.33', '20 seconds'], ['1', '1 minute'], ['5', '5 minutes'], ['10', '10 minutes'], ['15', '15 minutes'], ['30', '30 minutes'], ['60', '1 hour'], ['120', '2 hours'], ['240', '4 hours'], ['360', '6 hours'], ['720', '12 hours'], ['1440', '1 day'], ['2880', '2 days'], ['4320', '3 days'], ['10080', '1 week'], ['20160', '2 weeks']];
+  var C = workbenchClient, n = C.node;
+  var TIMER = [['0.33', '20 seconds'], ['1', '1 minute'], ['5', '5 minutes'], ['10', '10 minutes'], ['15', '15 minutes'], ['30', '30 minutes'], ['60', '1 hour'], ['120', '2 hours'], ['240', '4 hours'], ['360', '6 hours'], ['720', '12 hours'], ['1440', '1 day'], ['2880', '2 days'], ['4320', '3 days'], ['10080', '1 week'], ['20160', '2 weeks'], ['0', 'Never (only when I ask)']];
+  var screenshotsOn = function(values) { return values.legacy.screenCapture !== '0'; };
+  var SECTIONS = [
+    { id: 'suspension', title: 'Automatic suspension', text: 'Tabs you haven’t used for a while go to sleep to free up memory. Click a sleeping tab to wake it.', settings: [
+      { key: 'gsTimeToSuspend', type: 'select', options: TIMER, label: 'Suspend tabs I haven’t used for' },
+      { key: 'gsDontSuspendPinned', type: 'switch', label: 'Keep pinned tabs awake' },
+      { key: 'gsDontSuspendForms', type: 'switch', label: 'Keep tabs with unsaved typing awake', help: 'Applies when a page sees you type something. You can still suspend these tabs yourself.' },
+      { key: 'gsDontSuspendAudio', type: 'switch', label: 'Keep tabs playing audio awake' },
+      { key: 'gsDontSuspendActiveTabs', type: 'switch', label: 'Keep the tab you’re viewing in each window awake' },
+      { key: 'onlineCheck', type: 'switch', label: 'Don’t suspend while offline', help: 'A sleeping tab needs a connection to load again.' },
+      { key: 'batteryCheck', type: 'switch', label: 'Don’t suspend while plugged in' }
+    ] },
+    { id: 'sites', title: 'Sites that stay awake', text: 'Tabs from these sites are never suspended automatically. You can also add the current site from the toolbar popup.', settings: [
+      { key: 'gsWhitelist', type: 'textarea', label: 'One site or address per line', help: 'For example mail.google.com, or example.com/dashboard. Advanced: a /regular expression/.' }
+    ], extra: whitelistTest },
+    { id: 'limit', title: 'Tab limit', text: 'When too many tabs are awake, the ones you used least recently go to sleep.', settings: [
+      { key: 'countEnabled', source: 'workbench', type: 'switch', label: 'Limit how many tabs stay awake' },
+      { key: 'awakeLimit', source: 'workbench', type: 'number', min: 2, max: 10000, label: 'Most tabs awake at once', when: function(values) { return values.workbench.countEnabled; } },
+      { key: 'awakeTarget', source: 'workbench', type: 'number', min: 1, max: 9999, label: 'Then put tabs to sleep until this many are awake', help: 'Leaves room so the limit doesn’t kick in again right away.', when: function(values) { return values.workbench.countEnabled; } }
+    ], extra: enforceButton },
+    { id: 'snapshots', title: 'Snapshots', text: 'A snapshot is a saved list of your open tabs, so you can reopen them after a crash or a clean-up.', settings: [
+      { key: 'snapshotEnabled', source: 'workbench', type: 'switch', label: 'Save snapshots automatically' },
+      { key: 'snapshotIntervalMinutes', source: 'workbench', type: 'select', number: true, options: [['60', 'Every hour'], ['240', 'Every 4 hours'], ['720', 'Every 12 hours'], ['1440', 'Every day'], ['10080', 'Every week']], label: 'How often', when: function(values) { return values.workbench.snapshotEnabled; } },
+      { key: 'snapshotKeep', source: 'workbench', type: 'number', min: 1, max: 100, label: 'How many to keep', help: 'Older automatic and manual snapshots are removed first.', when: function(values) { return values.workbench.snapshotEnabled; } }
+    ], extra: function(section) { section.appendChild(n('p', { class: 'form-note' }, [n('a', { href: 'dashboard.html?view=snapshots', text: 'See and restore your snapshots' })])); } },
+    { id: 'appearance', title: 'Appearance', settings: [
+      { key: 'theme', source: 'workbench', type: 'select', options: [['system', 'Match my system'], ['light', 'Light'], ['dark', 'Dark']], label: 'Theme', help: 'For the popup, the tab list and these settings.' },
+      { key: 'gsTheme', type: 'select', options: [['light', 'Light'], ['dark', 'Dark']], label: 'Sleeping tab page' },
+      { key: 'screenCapture', type: 'select', options: [['0', 'Don’t show a screenshot'], ['1', 'Show the visible part'], ['2', 'Show the whole page']], label: 'Screenshot on sleeping tabs', help: 'Screenshots make suspending slower and use more memory.' },
+      { key: 'screenCaptureForce', type: 'switch', label: 'High-quality screenshots', help: 'Sharper, but slower and heavier.', when: screenshotsOn },
+      { key: 'cleanScreencaps', type: 'switch', label: 'Hide ads in screenshots', help: 'Downloads a public ad-blocking list to filter what is captured.', when: screenshotsOn }
+    ] },
+    { id: 'advanced', title: 'Advanced', settings: [
+      { key: 'gsUnsuspendOnFocus', type: 'switch', label: 'Wake a sleeping tab as soon as I switch to it' },
+      { key: 'gsIgnoreCache', type: 'switch', label: 'Reload pages fresh when waking', help: 'Skips the browser cache. Slower, but always up to date.' },
+      { key: 'discardAfterSuspend', type: 'switch', label: 'Also let the browser unload sleeping tabs', help: 'Frees a little more memory; switching back to a tab takes a moment longer.' },
+      { key: 'suspendInPlaceOfDiscard', type: 'switch', label: 'Suspend tabs the browser would otherwise unload', help: 'Keeps a readable page instead of a blank tab when memory runs low.' },
+      { key: 'gsAddContextMenu', type: 'switch', label: 'Add suspend options to the right-click menu' },
+      { key: 'gsSyncSettings', type: 'switch', label: 'Sync these settings with your browser account', help: 'Can overwrite settings on your other signed-in browsers. Tabs, workspaces and snapshots never sync.' }
+    ] }
+  ];
 
-  function say(text, kind) { C.notice(notice, text, kind); }
-  function error(err) { say(err.message || String(err), 'error'); }
-  function managed(key) {
-    return !!(legacyInfo && legacyInfo.managedKeys.includes(key));
+  var data = null, info = null, built = false, loading = false;
+  var controls = [], enforce = null;
+
+  function values() { return { legacy: data.legacySettings, workbench: data.settings }; }
+  function managed(setting) { return setting.source !== 'workbench' && info.managedKeys.includes(setting.key); }
+  function status(section, text, kind) {
+    var element = section.querySelector('.save-status');
+    element.textContent = text || '';
+    element.className = 'save-status' + (kind ? ' is-' + kind : '');
+    clearTimeout(element._timer);
+    if (kind === 'saved') element._timer = setTimeout(function() { element.textContent = ''; element.className = 'save-status'; }, 2500);
   }
-  function createInput(descriptor, value) {
-    var input;
-    if (descriptor.type === 'select') input = C.select(descriptor.options, value);
-    else if (descriptor.type === 'textarea') input = n('textarea', { rows: descriptor.rows || 7, value: value || '', spellcheck: 'false' });
-    else if (descriptor.type === 'checkbox') input = n('input', { type: 'checkbox', checked: !!value });
-    else input = n('input', { type: descriptor.type || 'number', value: value == null ? '' : value, min: descriptor.min === undefined ? '1' : descriptor.min, max: descriptor.max, step: descriptor.step || '1' });
-    input.id = descriptor.id || descriptor.key;
-    input.dataset.setting = descriptor.key;
-    input.dataset.valueType = descriptor.type === 'checkbox' ? 'boolean' : descriptor.type === 'select' || descriptor.type === 'textarea' || descriptor.type === 'text' ? 'string' : 'number';
-    input.dataset.focusKey = 'setting-' + input.id;
-    return input;
+  function current(setting) {
+    var source = setting.source === 'workbench' ? data.settings : data.legacySettings;
+    return source[setting.key];
   }
-  function readValue(input) {
-    if (input.dataset.valueType === 'boolean') return input.checked;
-    if (input.dataset.valueType === 'number') return Number(input.value);
+  function read(control) {
+    var setting = control.setting, input = control.input;
+    if (setting.type === 'switch') return input.checked;
+    if (setting.type === 'number' || setting.number) return Number(input.value);
     return input.value;
   }
-  function populate(form) {
-    if (form.dataset.dirty === 'true' || form.contains(document.activeElement)) return;
-    var source = form.dataset.source === 'legacy' ? data.legacySettings : data.settings;
-    Array.from(form.querySelectorAll('[data-setting]')).forEach(function(input) {
-      var value = source[input.dataset.setting];
-      if (input.type === 'checkbox') input.checked = !!value;
-      else if (value !== undefined && value !== null) {
-        if (input.tagName === 'SELECT' && !Array.from(input.options).some(function(option) { return option.value === String(value); })) input.appendChild(n('option', { value: value, text: 'Current: ' + value }));
-        input.value = value;
+  function write(control) {
+    var value = current(control.setting), input = control.input;
+    if (control.setting.type === 'switch') input.checked = !!value;
+    else if (control.setting.type === 'select') {
+      if (!Array.from(input.options).some(function(option) { return option.value === String(value); })) {
+        input.appendChild(n('option', { value: String(value), text: String(value) + (control.setting.number ? ' minutes' : '') }));
       }
-    });
+      input.value = String(value);
+    } else input.value = value == null ? '' : value;
   }
-  function addSection(id, title, description, source, descriptors, options) {
-    options = options || {};
-    var section = n('section', { class: 'settings-section', id: id }, [n('h2', { text: title }), n('p', { text: description })]);
-    var form = n('form', { 'data-source': source });
-    var editRevision = 0;
-    var grid = n('div', { class: 'form-grid' });
-    var values = source === 'legacy' ? data.legacySettings : data.settings;
-    descriptors.forEach(function(descriptor) {
-      var input = createInput(descriptor, values[descriptor.key]);
-      var help = descriptor.help || '';
-      if (source === 'legacy' && managed(descriptor.key)) { input.disabled = true; help = (help ? help + ' ' : '') + 'Managed by your organization.'; }
-      if (legacyInfo.incognito && ['gsSyncSettings', 'gsAddContextMenu'].includes(descriptor.key)) { input.disabled = true; help = 'Unavailable in an incognito extension context.'; }
-      var field = descriptor.type === 'checkbox' ? C.check(descriptor.label, input, help) : C.field(descriptor.label, input, help);
-      if (descriptor.full) field.classList.add('full-width');
-      grid.appendChild(field);
+  function validate(control, value) {
+    var setting = control.setting;
+    if (setting.type !== 'number') return '';
+    if (!Number.isInteger(value) || value < setting.min || value > setting.max) return 'Enter a whole number from ' + setting.min + ' to ' + setting.max + '.';
+    if (setting.key === 'awakeTarget' && value >= data.settings.awakeLimit) return 'Must be fewer than the limit (' + data.settings.awakeLimit + ').';
+    return '';
+  }
+  async function save(control) {
+    var setting = control.setting, value = read(control);
+    var problem = validate(control, value);
+    if (problem) { status(control.section, problem, 'error'); return; }
+    if (value === current(setting)) return;
+    if (setting.key === 'gsSyncSettings' && value) {
+      var accepted = await C.confirm({ title: 'Sync these settings?', text: 'Your settings may replace the ones on your other signed-in browsers. Tabs, workspaces and snapshots never sync.', accept: 'Turn on sync' });
+      if (!accepted) { write(control); return; }
+    }
+    status(control.section, 'Saving…');
+    try {
+      var patch = {}; patch[setting.key] = value;
+      // Lowering the limit below the keep-awake number moves that number down with it.
+      if (setting.key === 'awakeLimit' && value <= data.settings.awakeTarget) patch.awakeTarget = Math.max(1, Math.floor(value * 0.8));
+      if (setting.source === 'workbench') data.settings = await C.request('settings.update', { settings: patch });
+      else data.legacySettings = await C.request('legacy.update', { settings: patch });
+      if (setting.key === 'theme') C.theme(value);
+      status(control.section, patch.awakeTarget !== undefined && setting.key === 'awakeLimit' ? 'Saved. Keeping ' + patch.awakeTarget + ' awake after the limit is reached.' : 'Saved', 'saved');
+      controls.forEach(function(other) { if (other !== control && document.activeElement !== other.input) write(other); });
+      applyDependencies();
+    } catch (error) {
+      status(control.section, error.message || String(error), 'error');
+      write(control);
+    }
+  }
+  function applyDependencies() {
+    controls.forEach(function(control) {
+      var off = control.setting.when && !control.setting.when(values());
+      control.row.classList.toggle('is-disabled', !!off || control.locked);
+      control.input.disabled = !!off || control.locked;
     });
-    var status = n('span', { class: 'muted', role: 'status', 'aria-live': 'polite' });
-    var submit = n('button', { type: 'submit', class: 'primary', text: 'Save ' + title.toLowerCase() });
-    submit.dataset.focusKey = 'save-settings-' + id;
-    form.append(grid, n('div', { class: 'save-row' }, [submit, status]));
-    form.addEventListener('input', function() { editRevision++; form.dataset.dirty = 'true'; status.textContent = 'Unsaved changes'; });
-    form.addEventListener('change', function() { editRevision++; form.dataset.dirty = 'true'; status.textContent = 'Unsaved changes'; if (options.onChange) options.onChange(form); });
-    form.addEventListener('submit', async function(event) {
-      event.preventDefault();
-      var submittedRevision = editRevision, settings = {};
-      Array.from(form.querySelectorAll('[data-setting]')).forEach(function(input) { if (!input.disabled) settings[input.dataset.setting] = readValue(input); });
-      if (!Object.keys(settings).length) { status.textContent = 'These settings are managed.'; return; }
-      if (source !== 'legacy') {
-        var effectiveLimit = settings.awakeLimit === undefined ? data.settings.awakeLimit : settings.awakeLimit;
-        var effectiveTarget = settings.awakeTarget === undefined ? data.settings.awakeTarget : settings.awakeTarget;
-        if (effectiveTarget >= effectiveLimit) { status.textContent = 'Target must be lower than the awake-tab limit.'; status.classList.add('error-text'); var targetInput = form.querySelector('[data-setting="awakeTarget"]'); if (targetInput) targetInput.focus(); return; }
-      }
-      if (source === 'legacy' && settings.gsSyncSettings && !data.legacySettings.gsSyncSettings) {
-        if (!await C.confirm({ title: 'Enable legacy preference sync?', text: 'This can overwrite legacy settings on other browsers using the same browser account. New workbench data is never synced.', accept: 'Enable sync' })) return;
-      }
-      status.classList.remove('error-text');
-      var focus = legacyUi.focusKey(submit);
-      submit.disabled = true; status.textContent = 'Saving…';
+    if (enforce) enforce.disabled = !data.settings.countEnabled || info.incognito;
+  }
+  function settingRow(setting, section) {
+    var id = 'setting-' + setting.key, input;
+    if (setting.type === 'switch') input = n('input', { type: 'checkbox', class: 'switch', id: id, role: 'switch' });
+    else if (setting.type === 'select') input = C.select(setting.options, undefined, { id: id });
+    else if (setting.type === 'textarea') input = n('textarea', { id: id, rows: '6', spellcheck: 'false' });
+    else input = n('input', { type: 'number', id: id, min: String(setting.min), max: String(setting.max), step: '1' });
+    var help = setting.help || '';
+    var privateOnly = info.incognito && (setting.source === 'workbench' || ['gsSyncSettings', 'gsAddContextMenu'].includes(setting.key));
+    var locked = managed(setting) || privateOnly;
+    if (managed(setting)) help = 'Set by your organization.';
+    else if (privateOnly) help = 'Change this from a normal (non-private) window.';
+    var text = n('div', { class: 'setting-text' }, [n('label', { for: id, text: setting.label }), help ? n('small', { text: help }) : null]);
+    var row = n('div', { class: 'setting' + (setting.type === 'textarea' ? ' stacked' : '') + (setting.type === 'switch' ? ' is-switch' : '') }, [text, input]);
+    var control = { setting: setting, input: input, row: row, section: section, locked: locked };
+    write(control);
+    var event = setting.type === 'textarea' || setting.type === 'number' ? 'change' : 'input';
+    input.addEventListener(event, function() { save(control); });
+    if (setting.type === 'number') input.addEventListener('keydown', function(keyEvent) { if (keyEvent.key === 'Enter') { keyEvent.preventDefault(); save(control); } });
+    controls.push(control);
+    return row;
+  }
+  function whitelistTest(section) {
+    var output = n('div', { class: 'form-note', role: 'status' });
+    var test = C.button('Which open tabs match?', async function() {
       try {
-        await C.request(source === 'legacy' ? 'legacy.update' : 'settings.update', { settings: settings });
-        var newerEdits = editRevision !== submittedRevision;
-        form.dataset.dirty = newerEdits ? 'true' : 'false'; status.textContent = newerEdits ? 'Saved; newer changes are unsaved' : 'Saved';
-        if (settings.theme) C.theme(settings.theme);
-        await refresh();
-      } catch (err) { status.textContent = err.message || String(err); status.classList.add('error-text'); }
-      finally { submit.disabled = false; if (document.activeElement === document.body) legacyUi.restoreFocus(focus); }
-    });
-    section.appendChild(form); content.appendChild(section); forms.push(form);
-    if (options.extra) options.extra(section, form);
-    if (options.onChange) options.onChange(form);
-    return section;
+        var list = section.querySelector('textarea').value;
+        var matches = (await C.request('legacy.whitelist.test', { whitelist: list })).tabs;
+        output.replaceChildren(n('p', { class: 'muted', text: matches.length ? matches.length + ' open ' + (matches.length === 1 ? 'tab matches' : 'tabs match') + ' this list:' : 'No open tabs match this list.' }));
+        if (matches.length) output.appendChild(n('ul', { class: 'record-tabs' }, matches.map(function(row) { return n('li', { text: (row.title || 'Untitled tab') + ' — ' + (row.originalUrl || row.url) }); })));
+      } catch (error) { output.replaceChildren(n('p', { class: 'error-text', text: error.message })); }
+    }, { class: 'small' });
+    section.append(n('div', { class: 'button-row form-note' }, [test]), output);
+  }
+  function enforceButton(section) {
+    var output = n('p', { class: 'form-note muted', role: 'status' });
+    var apply = C.button('Apply the limit now', async function() {
+      apply.disabled = true;
+      try { output.textContent = C.resultText(await C.request('counts.enforce'), 'Done.'); }
+      catch (error) { output.textContent = error.message; }
+      finally { apply.disabled = false; }
+    }, { class: 'small' });
+    section.append(n('div', { class: 'button-row form-note' }, [apply]), output);
+    enforce = apply;
   }
   function build() {
-    content.replaceChildren(); forms = [];
-    addSection('suspension', 'Automatic suspension', 'These are the original suspension preferences. Workspaces can inherit or override them. Workbench bulk actions always keep real drafts, audio, meetings and snoozes safe.', 'legacy', [
-      { key: 'gsTimeToSuspend', id: 'timeToSuspend', type: 'select', options: suspendOptions, label: 'Suspend an inactive tab after' },
-      { key: 'gsDontSuspendPinned', id: 'dontSuspendPinned', type: 'checkbox', label: 'Never automatically suspend pinned tabs' },
-      { key: 'gsDontSuspendForms', id: 'dontSuspendForms', type: 'checkbox', label: 'Never automatically suspend tabs with unsaved form input' },
-      { key: 'gsDontSuspendAudio', id: 'dontSuspendAudio', type: 'checkbox', label: 'Never automatically suspend tabs playing audio' },
-      { key: 'gsDontSuspendActiveTabs', id: 'dontSuspendActiveTabs', type: 'checkbox', label: 'Never automatically suspend the active tab in each window' },
-      { key: 'onlineCheck', type: 'checkbox', label: 'Never automatically suspend while offline' },
-      { key: 'batteryCheck', type: 'checkbox', label: 'Never automatically suspend while connected to power' }
-    ]);
-    addSection('counts', 'Awake-tab limit', 'When the awake count exceeds the limit, eligible tabs sleep oldest-first until the target is reached. Protected tabs stay awake, so the final count may remain above target.', 'workbench', [
-      { key: 'countEnabled', type: 'checkbox', label: 'Enable awake-tab count policy', full: true },
-      { key: 'awakeLimit', label: 'Suspend when awake count exceeds', min: '1', max: '100000' },
-      { key: 'awakeTarget', label: 'Suspend down to awake count', min: '1', max: '100000' }
-    ], { extra: function(section) {
-      var result = n('div', { class: 'operation-result', role: 'status', hidden: true });
-      section.append(b('Enforce saved policy now', async function(event) {
-        var trigger = event.currentTarget; trigger.disabled = true;
-        try { var outcome = await C.request('counts.enforce'); C.renderResult(result, outcome, 'Saved awake-tab policy checked.'); await refresh(); }
-        catch (err) { error(err); } finally { trigger.disabled = false; }
-      }), result, n('a', { class: 'button-link', href: 'dashboard.html?view=insights', text: 'See measured policy results' }));
-    } });
-    addSection('exclusions', 'Never-suspend list', 'One URL, domain fragment or /regular expression/ per line. Matching uses the original extension rules.', 'legacy', [
-      { key: 'gsWhitelist', id: 'whitelist', type: 'textarea', label: 'Excluded URLs and sites', help: 'Examples: https://mail.google.com, example.com, /^https:.*example\\.com/', full: true }
-    ], { extra: function(section, form) {
-      var result = n('div', { class: 'operation-result', hidden: true, role: 'status' });
-      section.append(b('Test list against open tabs', async function() {
-        try {
-          var whitelist = form.querySelector('textarea').value;
-          var matches = (await C.request('legacy.whitelist.test', { whitelist: whitelist })).tabs;
-          result.replaceChildren(n('p', { text: matches.length + ' matching open tabs. This tests the entered list; use Save to apply unsaved changes.' }));
-          if (matches.length) result.appendChild(n('ul', { class: 'reason-list' }, matches.map(function(row) { return n('li', { text: (row.title || 'Untitled tab') + ' — ' + (row.originalUrl || row.url) }); })));
-          result.hidden = false;
-        } catch (err) { error(err); }
-      }), result);
-    } });
-    addSection('appearance', 'Workbench appearance', 'Popup, dashboard and settings use the same theme. The suspended-page theme remains separately configurable below.', 'workbench', [
-      { key: 'theme', id: 'workbenchTheme', type: 'select', label: 'Workbench theme', options: [['system', 'Follow system'], ['light', 'Light'], ['dark', 'Dark']] }
-    ]);
-    addSection('screenshots', 'Suspended pages & screenshots', 'Preserves the original suspended page and screenshot controls. Screenshots may increase suspension time and resource use.', 'legacy', [
-      { key: 'gsTheme', id: 'theme', type: 'select', label: 'Suspended-page theme', options: [['light', 'Light'], ['dark', 'Dark']] },
-      { key: 'screenCapture', id: 'preview', type: 'select', label: 'Screen capture', options: [['0', 'Disabled'], ['1', 'Visible screen only'], ['2', 'Entire page']] },
-      { key: 'screenCaptureForce', id: 'forceScreenCapture', type: 'checkbox', label: 'Enable high-quality screen capture', help: 'Removes the original capture quality, timeout and height limits; can increase CPU and memory use.' },
-      { key: 'cleanScreencaps', id: 'cleanScreenCaptures', type: 'checkbox', label: 'Clean screen captures', help: 'Preserves the original advertisement-blocking capture option and its host blocklist behavior.' },
-      { key: 'discardAfterSuspend', type: 'checkbox', label: 'Also apply browser tab discarding after suspension', help: 'May add a rendering delay when selecting the suspended tab.' }
-    ]);
-    addSection('restoration', 'Restoration', 'A measured queue for restoring archives, snapshots and workspaces. Lower concurrency and a longer delay reduce simultaneous page loads.', 'workbench', [
-      { key: 'restoreConcurrency', label: 'Concurrent tab restores', min: '1', max: '10' },
-      { key: 'restoreDelayMs', label: 'Delay between restores (milliseconds)', min: '0', max: '10000', step: '1' }
-    ]);
-    addSection('focus-restoration', 'Original restore behavior', 'The original focus and cache preferences still apply to suspended pages.', 'legacy', [
-      { key: 'gsUnsuspendOnFocus', id: 'unsuspendOnFocus', type: 'checkbox', label: 'Automatically restore a suspended tab when it is viewed' },
-      { key: 'gsIgnoreCache', id: 'ignoreCache', type: 'checkbox', label: 'Bypass browser cache when restoring', help: 'Requests fresh content rather than reusing the browser cache.' }
-    ]);
-    addSection('snapshots', 'Scheduled snapshots', 'Real local snapshots are checked each minute. Retention applies to saved snapshots; these are URL and organization records, not page backups.', 'workbench', [
-      { key: 'snapshotEnabled', type: 'checkbox', label: 'Enable scheduled local snapshots', full: true },
-      { key: 'snapshotIntervalMinutes', label: 'Snapshot interval (minutes)', min: '1', max: '525600' },
-      { key: 'snapshotKeep', label: 'Snapshots to retain', min: '1', max: '1000' }
-    ], { extra: function(section) { section.appendChild(n('a', { class: 'button-link', href: 'dashboard.html?view=snapshots', text: 'Save, compare & restore snapshots' })); } });
-    addSection('startup', 'Browser startup', 'Runs on an actual browser startup, not when the extension or this page reloads. Workspace switching keeps protected work open.', 'workbench', [
-      { key: 'startupPolicy', type: 'select', label: 'When the browser starts', options: [['leave', 'Leave tabs exactly as they are'], ['current', 'Restore current workspace; safely hibernate the others'], ['choose', 'Open the workspace chooser without waking tabs']], full: true }
-    ], { extra: function(section) { section.appendChild(n('a', { class: 'button-link', href: 'dashboard.html?view=workspaces', text: 'Choose current workspace' })); } });
-    addSection('review', 'Review & activity', 'Neglected-tab recommendations use the last recorded foreground view, or creation time. Nothing is closed just for being old. Activity measures focused, non-idle browser time, not attention.', 'workbench', [
-      { key: 'neglectedDays', label: 'Recommend review after this many days', min: '1', max: '3650' }
-    ], { extra: function(section) { section.append(n('a', { class: 'button-link', href: 'dashboard.html?view=neglected', text: 'Review neglected tabs' }), n('a', { class: 'button-link', href: 'dashboard.html?view=insights', text: 'View local activity & metrics' })); } });
-    buildMemory();
-    addSection('browser', 'Browser integration', 'These original browser preferences remain available. New tab metadata and activity are local-only.', 'legacy', [
-      { key: 'gsAddContextMenu', id: 'addContextMenu', type: 'checkbox', label: 'Enable right-click context menu actions' },
-      { key: 'gsSyncSettings', id: 'syncSettings', type: 'checkbox', label: 'Sync legacy preferences using the browser account', help: 'Enabling can overwrite settings on other signed-in browsers. Does not sync workbench data.' },
-      { key: 'suspendInPlaceOfDiscard', type: 'checkbox', label: 'Suspend tabs when the browser would otherwise discard them', help: 'The original low-memory behavior. This can suspend earlier than your inactivity timer and is separate from the optional native helper.' }
-    ]);
+    var content = document.getElementById('settings-content');
+    var nav = document.getElementById('settings-navigation');
+    content.replaceChildren(); nav.replaceChildren(); controls = [];
+    SECTIONS.forEach(function(definition) {
+      var section = n('section', { class: 'settings-section', id: definition.id, 'aria-labelledby': definition.id + '-title' });
+      section.append(n('div', { class: 'record-heading' }, [n('h2', { id: definition.id + '-title', text: definition.title }), n('span', { class: 'save-status', role: 'status', 'aria-live': 'polite' })]));
+      if (definition.text) section.appendChild(n('p', { text: definition.text }));
+      definition.settings.forEach(function(setting) { section.appendChild(settingRow(setting, section)); });
+      if (definition.extra) definition.extra(section);
+      content.appendChild(section);
+      var link = n('a', { class: 'nav-link', href: '#' + definition.id, text: definition.title });
+      nav.appendChild(link);
+    });
+    applyDependencies();
     built = true;
+    // Highlight the section being read in the sidebar.
+    var links = Array.from(nav.children);
+    var observer = new IntersectionObserver(function(entries) {
+      entries.forEach(function(entry) {
+        if (!entry.isIntersecting) return;
+        links.forEach(function(link) { if (link.getAttribute('href') === '#' + entry.target.id) link.setAttribute('aria-current', 'location'); else link.removeAttribute('aria-current'); });
+      });
+    }, { rootMargin: '-80px 0px -60% 0px' });
+    content.querySelectorAll('.settings-section').forEach(function(section) { observer.observe(section); });
     requestAnimationFrame(function() {
-      var target = document.getElementById(location.hash.slice(1));
+      var target = location.hash && document.getElementById(location.hash.slice(1));
       if (target) target.scrollIntoView({ block: 'start' });
     });
-  }
-  function buildMemory() {
-    var section = n('section', { class: 'settings-section', id: 'memory' }, [n('h2', { text: 'Optional macOS memory helper' }), n('p', { text: 'Off by default. An optional local native host reads macOS memory pressure using sysctl. While enabled, the extension checks each minute and safely suspends oldest eligible tabs when your chosen threshold is reached. It never estimates RAM savings.' })]);
-    memoryStatus = n('div', { class: 'notice', role: 'status', 'aria-live': 'polite' });
-    memoryResult = n('div', { class: 'operation-result', hidden: true });
-    var settings = data.settings.memory;
-    var enabled = n('input', { type: 'checkbox', checked: settings.enabled, id: 'memory-enabled', 'data-focus-key': 'memory-enabled' });
-    var level = C.select([['warning', 'Warning or critical pressure'], ['critical', 'Critical pressure only']], settings.level, { id: 'memory-level', 'data-focus-key': 'memory-level' });
-    var target = n('input', { type: 'number', min: '1', max: '10000', step: '1', value: settings.target, id: 'memory-target', 'data-focus-key': 'memory-target' });
-    var save = n('button', { type: 'submit', class: 'primary', text: 'Save memory helper settings', 'data-focus-key': 'memory-save' });
-    var form = n('form', {}, [n('div', { class: 'form-grid' }, [C.check('Enable automatic pressure-based suspension', enabled, 'Requires the separately installed macOS helper.'), C.field('Pressure threshold', level), C.field('Target awake tabs under pressure', target)]), n('div', { class: 'button-row' }, [save, b('Check pressure now', function(event) { memoryCommand('memory.check', {}, event.currentTarget); }, { 'data-focus-key': 'memory-check' }), b('Disable & disconnect', function(event) { memoryCommand('memory.disconnect', {}, event.currentTarget); }, { 'data-focus-key': 'memory-disconnect' })])]);
-    form.addEventListener('submit', function(event) { event.preventDefault(); memoryCommand('memory.configure', { enabled: enabled.checked, level: level.value, target: Number(target.value) }, save); });
-    var extensionId = chrome.runtime.id;
-    var command = './native/install-host.sh --extension-id ' + extensionId;
-    var install = n('details', {}, [n('summary', { text: 'Install or remove the optional helper' }), n('p', { text: 'macOS only. In Terminal, from the extension source folder containing native/install-host.sh, run the command below. It compiles the Swift host using Apple’s command-line tools and registers it for this extension ID. This page does not install anything automatically.' }), n('p', { class: 'muted', text: 'Installed extension ID: ' + extensionId }), n('code', { class: 'native-command', text: command }), b('Copy install command', async function() {
-      try {
-        if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('Clipboard access is unavailable. Select and copy the command manually.');
-        await navigator.clipboard.writeText(command); say('Install command copied.', 'success');
-      } catch (err) { error(err); }
-    }), n('p', { class: 'muted', text: 'On macOS, the installer defaults to $HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts, where Brave looks up user-level native hosts. --user-data-dir does not change that lookup. Optional --browser-dir selects a host-registration base or NativeMessagingHosts directory—not a browser profile—and only changes where the installer writes files; it does not redirect Brave. The helper receives no tab titles, URLs or page values.' })]);
-    var uninstallCommand = command.replace('/install-host.sh', '/uninstall-host.sh');
-    install.append(n('h3', { text: 'Remove an installed helper' }), n('p', { text: 'Use Disable & disconnect first, then run this command from the same source folder. For a custom install, use the exact host-registration --browser-dir and helper --install-dir passed during installation. Removal verifies the extension ID and host path and does not remove browser profile data.' }), n('code', { class: 'native-command', text: uninstallCommand }), b('Copy removal command', async function() {
-      try {
-        if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('Clipboard access is unavailable. Select and copy the command manually.');
-        await navigator.clipboard.writeText(uninstallCommand); say('Removal command copied.', 'success');
-      } catch (err) { error(err); }
-    }));
-    section.append(memoryStatus, form, memoryResult, install); content.appendChild(section);
-    var controls = { form: form, enabled: enabled, level: level, target: target, editRevision: 0 };
-    section._memoryForm = controls;
-    form.addEventListener('input', function() { controls.editRevision++; form.dataset.dirty = 'true'; });
-    form.addEventListener('change', function() { controls.editRevision++; form.dataset.dirty = 'true'; });
-  }
-  async function memoryCommand(command, payload, trigger) {
-    var focus = legacyUi.focusKey(trigger);
-    var controls = document.getElementById('memory')._memoryForm, submittedRevision = controls.editRevision;
-    trigger.disabled = true;
-    try {
-      var result = await C.request(command, payload);
-      var newerEdits = command === 'memory.configure' && controls.editRevision !== submittedRevision;
-      if (command === 'memory.configure') controls.form.dataset.dirty = newerEdits ? 'true' : 'false';
-      C.renderResult(memoryResult, result, command === 'memory.check' ? 'Memory pressure checked using the installed native host.' : newerEdits ? 'Submitted memory helper settings saved; newer changes are unsaved.' : 'Memory helper settings updated.');
-      await refresh();
-    } catch (err) {
-      memoryResult.replaceChildren(n('p', { class: 'error-text', text: err.message || String(err) }));
-      memoryResult.hidden = false;
-      await refresh();
-    }
-    finally { trigger.disabled = false; if (document.activeElement === document.body) legacyUi.restoreFocus(focus); }
-  }
-  function updateMemory() {
-    if (!memoryStatus) return;
-    var memory = data.memory || {};
-    var text = (data.settings.memory.enabled ? 'Automation enabled' : 'Automation disabled') + '. Helper ' + (memory.connected ? 'connected' : 'not connected') + '. Pressure: ' + (memory.level || 'unknown') + (memory.rawLevel == null ? '' : ' (macOS value ' + memory.rawLevel + ')') + (memory.checkedAt ? '. Last checked ' + C.date(memory.checkedAt) + '.' : '. No reading yet.');
-    if (memory.error) text += ' ' + memory.error;
-    C.notice(memoryStatus, text, memory.error ? 'error' : '');
-    var controls = document.getElementById('memory')._memoryForm;
-    if (controls.form.dataset.dirty !== 'true' && !controls.form.contains(document.activeElement)) {
-      controls.enabled.checked = data.settings.memory.enabled; controls.level.value = data.settings.memory.level; controls.target.value = data.settings.memory.target;
-    }
   }
   async function refresh() {
     if (loading) return;
     loading = true;
     try {
       var response = await Promise.all([C.request('view.get'), C.request('legacy.settings.get')]);
-      data = response[0]; legacyInfo = response[1]; data.legacySettings = legacyInfo.settings;
+      data = response[0]; info = response[1]; data.legacySettings = info.settings;
       C.theme(data.settings.theme);
       if (!built) build();
-      else forms.forEach(populate);
-      updateMemory();
-      if (legacyInfo.incognito) say('Workbench excludes incognito tabs and does not record incognito activity. Some legacy preferences are unavailable in this context.');
-    } catch (err) {
-      error(err);
-      if (!built) content.replaceChildren(n('div', { class: 'empty-state' }, [n('h2', { text: 'Could not load settings' }), n('p', { text: 'Your settings have not been changed.' }), b('Retry loading settings', refresh)]));
-    } finally { loading = false; content.setAttribute('aria-busy', 'false'); }
+      else controls.forEach(function(control) { if (document.activeElement !== control.input) write(control); });
+      applyDependencies();
+      if (info.incognito) C.notice(document.getElementById('settings-notice'), 'You’re in a private window. Some settings are only available in a normal window.');
+    } catch (error) {
+      C.notice(document.getElementById('settings-notice'), error.message || String(error), 'error');
+      if (!built) document.getElementById('settings-content').replaceChildren(n('div', { class: 'empty-state' }, [n('h2', { text: 'Couldn’t load settings' }), n('p', { text: 'Reload this page to try again. Nothing was changed.' })]));
+    } finally {
+      loading = false;
+      document.getElementById('settings-content').setAttribute('aria-busy', 'false');
+    }
   }
   if (new URL(location.href).searchParams.has('firstTime')) {
     document.getElementById('settings-title').textContent = 'Welcome to The Great Suspender';
-    say('Your existing suspension controls are here. Open the workbench to organize tabs, review safety previews and save local sessions.');
+    C.notice(document.getElementById('settings-notice'), 'Tabs you haven’t used for an hour will now go to sleep to save memory. Pin the extension to your toolbar to suspend or wake a tab with one click. Everything below is optional.', 'success');
   }
   C.subscribe(refresh);
   window.addEventListener('focus', refresh);
