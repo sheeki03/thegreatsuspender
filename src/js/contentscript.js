@@ -9,7 +9,8 @@
 (function() {
   'use strict';
 
-  const guardKey = '__greatSuspenderDraftGuard';
+  // Versioned so a reloaded extension installs this logic rather than reusing an older guard.
+  const guardKey = '__greatSuspenderDraftGuardV2';
   if (window[guardKey]) {
     window[guardKey].reconnect(chrome.runtime);
     window[guardKey].refresh();
@@ -33,7 +34,6 @@
   const dirtyEditors = new Set();
   const designModeLocks = new Map();
   let isInitialised = false;
-  let lateEditableState = false;
   let hiddenEditableState = false;
   const observedDocuments = new WeakSet();
   const documents = new Set();
@@ -41,16 +41,6 @@
   const hiddenEditEvents = new Set([
     'beforeinput', 'input', 'compositionstart', 'compositionend', 'paste', 'drop',
   ]);
-
-  function hasExistingEditor(doc) {
-    return doc.designMode === 'on' || !!doc.querySelector(
-      '[contenteditable]:not([contenteditable="false"]),' +
-      'input:not([readonly]):not([disabled]):not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"]),' +
-      'input[readonly]:not([disabled]):is([type="checkbox"],[type="radio"],[type="file"],[type="color"],[type="range"]),' +
-      'textarea:not([readonly]):not([disabled]),select:not([disabled]),' +
-      'object[type="application/pdf"],embed[type="application/pdf"]'
-    );
-  }
 
   function editableTarget(e) {
     const path = e.composedPath ? e.composedPath() : [e.target];
@@ -194,11 +184,6 @@
       return;
     }
     observedDocuments.add(doc);
-    if (doc.readyState !== 'loading' && hasExistingEditor(doc)) {
-      // Values cannot tell us safely whether edits predated this injection.
-      // Require a safe reload instead of pretending old editors are clean.
-      lateEditableState = true;
-    }
     [
       'beforeinput', 'input', 'change', 'compositionstart', 'compositionend',
       'paste', 'cut', 'drop', 'keydown', 'pointerdown', 'click',
@@ -231,24 +216,11 @@
     freezeEditors();
   }
 
-  function hasUnverifiedFrames() {
+  // Only an edit we saw but could not attribute to an element (a closed shadow
+  // root) is reported. Cross-site frames and pre-existing inputs are not edits.
+  function hasHiddenEdits() {
     refreshDocuments();
-    let unverified = lateEditableState || hiddenEditableState;
-    documents.forEach(doc => {
-      if (doc.querySelector('object[type="application/pdf"],embed[type="application/pdf"]')) {
-        unverified = true;
-      }
-      doc.querySelectorAll('iframe,frame').forEach(frame => {
-        try {
-          if (!frame.contentDocument) {
-            unverified = true;
-          }
-        } catch (e) {
-          unverified = true;
-        }
-      });
-    });
-    return unverified;
+    return hiddenEditableState;
   }
 
   window[guardKey] = {
@@ -283,8 +255,7 @@
         const response = buildReportTabStatePayload();
         response.documentUrl = location.href;
         const withinDeadline = !Number.isFinite(request.deadlineAt) || request.deadlineAt > Date.now();
-        if (withinDeadline && !hiddenEditableState &&
-            ((!response.dirty && !response.draftUnverified) || request.allowDirtyForPolicy === true)) {
+        if (withinDeadline && (!response.dirty || request.allowDirtyForPolicy === true)) {
           draftLease = {
             token: createToken(),
             expiresAt: Date.now() + 2000,
@@ -362,7 +333,7 @@
             : 'normal',
       dirty: isDirty,
       temporaryWhitelist: !!tempWhitelist,
-      draftUnverified: hasUnverifiedFrames(),
+      draftUnverified: hasHiddenEdits(),
       scrollPos:
         (document.body && document.body.scrollTop) ||
         (document.documentElement && document.documentElement.scrollTop) || 0,

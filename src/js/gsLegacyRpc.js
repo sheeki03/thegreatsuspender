@@ -177,23 +177,26 @@ var gsLegacyRpc = (function() {
         if (!row.asleep) reasons = ['Tab is already awake.'];
       } else if (row.asleep) {
         reasons = ['Tab is already asleep.'];
-      } else if (row.protectionReasons.includes('Tab state could not be verified')) {
-        reasons = row.protectionReasons;
       } else if (!gsTabSuspendManager.checkTabEligibilityForSuspension(tab, forceLevel)) {
-        reasons = row.protectionReasons.length ? row.protectionReasons : ['Protected by legacy suspension preferences.'];
+        reasons = row.protectionReasons.filter(reason => reason !== 'Tab state could not be verified');
+        if (!reasons.length) reasons = ['Protected by legacy suspension preferences.'];
       } else if (forceLevel >= 2 && !tab.discarded) {
+        // Only what the page actually reports blocks; a page that can't answer is not dirty.
         const info = await privateResponse(resolve => {
           gsMessages.sendRequestInfoToContentScript(id, (error, value) => resolve(error ? null : value));
         }, null);
-        if (!info) {
-          reasons = ['Tab state could not be verified'];
-        } else if (info.temporaryWhitelist || info.status === gsUtils.STATUS_TEMPWHITELIST) {
+        if (info && (info.temporaryWhitelist || info.status === gsUtils.STATUS_TEMPWHITELIST)) {
           reasons = ['Temporarily excluded'];
-        } else if (gsStorage.getOption(gsStorage.IGNORE_FORMS) &&
-            (!info || typeof info.dirty !== 'boolean' || typeof info.draftUnverified !== 'boolean' ||
-              info.dirty || info.draftUnverified || info.status === gsUtils.STATUS_FORMINPUT)) {
-          reasons = ['Unsaved form input or editable state cannot be verified.'];
+        } else if (info && gsStorage.getOption(gsStorage.IGNORE_FORMS) &&
+            (info.dirty || info.status === gsUtils.STATUS_FORMINPUT)) {
+          reasons = ['Unsaved form or editable content'];
         }
+      } else if (payload.action === 'suspend' && !tab.discarded && !(payload.options && payload.options.ignoreDrafts)) {
+        // A tab chosen by hand still asks before losing typing the page reported.
+        const info = await privateResponse(resolve => {
+          gsMessages.sendRequestInfoToContentScript(id, (error, value) => resolve(error ? null : value));
+        }, null);
+        if (info && (info.dirty || info.status === gsUtils.STATUS_FORMINPUT)) reasons = ['Unsaved form or editable content'];
       }
       if (reasons.length) skipped.push({ ...row, reasons });
       else eligible.push(row);

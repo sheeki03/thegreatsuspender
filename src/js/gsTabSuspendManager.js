@@ -149,9 +149,10 @@ var gsTabSuspendManager = (function() {
     }
 
     let tabInfo = await getContentScriptTabInfo(tab);
-    if (shouldProtectForms(tab.id, executionProps.forceLevel, executionProps.workbench) &&
-        !tab.discarded && (!tabInfo || typeof tabInfo.dirty !== 'boolean' ||
-        typeof tabInfo.draftUnverified !== 'boolean' || tabInfo.dirty || tabInfo.draftUnverified)) {
+    // Only typing the page actually reported counts as unsaved work. A page that
+    // cannot answer (still loading, restricted, or older than this install) is not.
+    if (shouldProtectForms(tab.id, executionProps.forceLevel, executionProps) &&
+        !tab.discarded && tabInfo && tabInfo.dirty) {
       resolve(false);
       return;
     }
@@ -181,7 +182,7 @@ var gsTabSuspendManager = (function() {
     const isEligible = checkContentScriptEligibilityForSuspension(
       tabInfo,
       executionProps.forceLevel,
-      executionProps.workbench,
+      executionProps,
       tab.id
     );
     if (!isEligible) {
@@ -336,16 +337,16 @@ var gsTabSuspendManager = (function() {
       if (!Array.isArray(reasons) || reasons.length) return false;
     }
 
-    const protectForms = shouldProtectForms(currentTab.id, executionProps.forceLevel, executionProps.workbench);
+    const protectForms = shouldProtectForms(currentTab.id, executionProps.forceLevel, executionProps);
     let lease = null;
     if (executionProps.forceLevel >= 2 || executionProps.workbench) {
       if (!currentTab.discarded) {
+        // The lease freezes editors for the instant of navigation when the page
+        // can grant one. A page that cannot answer is suspended without it.
         const info = await getContentScriptTabInfo(currentTab, 'prepareTabAction', { allowDirtyForPolicy: !protectForms });
         const verifiedLease = info && info.draftLease && info.documentUrl === currentTab.url &&
-          info.draftLease.expiresAt > Date.now() &&
-          typeof info.dirty === 'boolean' && typeof info.draftUnverified === 'boolean';
-        if ((protectForms && !verifiedLease) ||
-            !checkContentScriptEligibilityForSuspension(info || { status: 'unknown' }, executionProps.forceLevel, executionProps.workbench, currentTab.id) ||
+          info.draftLease.expiresAt > Date.now();
+        if (!checkContentScriptEligibilityForSuspension(info || { status: 'unknown' }, executionProps.forceLevel, executionProps, currentTab.id) ||
             !checkTabEligibilityForSuspension(currentTab, executionProps.forceLevel, executionProps)) {
           if (info && info.draftLease) {
             gsMessages.sendMessageToContentScript(currentTab.id, {
@@ -360,7 +361,6 @@ var gsTabSuspendManager = (function() {
     const latestTab = await gsChrome.tabsGet(currentTab.id);
     if (!latestTab || latestTab.url !== currentTab.url || gsUtils.isSuspendedTab(latestTab, true) ||
         !checkTabEligibilityForSuspension(latestTab, executionProps.forceLevel, executionProps) ||
-        (protectForms && !latestTab.discarded && !lease) ||
         (lease && lease.expiresAt <= Date.now())) {
       if (lease) gsMessages.sendMessageToContentScript(currentTab.id, {
         action: 'releaseTabAction', token: lease.token,
@@ -378,7 +378,7 @@ var gsTabSuspendManager = (function() {
       let leaseActive = true;
       const renew = lease ? setInterval(async () => {
         try {
-          const protectsNow = shouldProtectForms(currentTab.id, executionProps.forceLevel, executionProps.workbench);
+          const protectsNow = shouldProtectForms(currentTab.id, executionProps.forceLevel, executionProps);
           const info = await getContentScriptTabInfo(currentTab, 'prepareTabAction', { allowDirtyForPolicy: !protectsNow });
           if (!leaseActive) {
             if (info && info.draftLease) {
@@ -387,7 +387,7 @@ var gsTabSuspendManager = (function() {
               }, gsMessages.WARNING);
             }
           } else if (!info || !info.draftLease ||
-              !checkContentScriptEligibilityForSuspension(info, executionProps.forceLevel, executionProps.workbench, currentTab.id) ||
+              !checkContentScriptEligibilityForSuspension(info, executionProps.forceLevel, executionProps, currentTab.id) ||
               info.documentUrl !== currentTab.url) {
             gsTabDiscardManager.unqueueTabForDiscard(currentTab);
           } else {
@@ -403,12 +403,11 @@ var gsTabSuspendManager = (function() {
             if (!checkTabEligibilityForSuspension(rawTab, executionProps.forceLevel, executionProps) ||
                 (executionProps.expectedOriginalUrl && executionProps.expectedOriginalUrl !== rawTab.url)) return false;
             if (!rawTab.discarded) {
-              const protectsNow = shouldProtectForms(rawTab.id, executionProps.forceLevel, executionProps.workbench);
+              const protectsNow = shouldProtectForms(rawTab.id, executionProps.forceLevel, executionProps);
               const info = await getContentScriptTabInfo(rawTab, 'prepareTabAction', { allowDirtyForPolicy: !protectsNow });
               const verified = info && info.draftLease && info.documentUrl === rawTab.url &&
                 info.draftLease.expiresAt > Date.now();
-              if ((protectsNow && !verified) ||
-                  !checkContentScriptEligibilityForSuspension(info || { status: 'unknown' }, executionProps.forceLevel, executionProps.workbench, rawTab.id) ||
+              if (!checkContentScriptEligibilityForSuspension(info || { status: 'unknown' }, executionProps.forceLevel, executionProps, rawTab.id) ||
                   !checkTabEligibilityForSuspension(rawTab, executionProps.forceLevel, executionProps)) return false;
               if (verified) lease = info.draftLease;
             }
@@ -416,7 +415,6 @@ var gsTabSuspendManager = (function() {
             if (!latest || latest.url !== rawTab.url ||
                 !checkTabEligibilityForSuspension(latest, executionProps.forceLevel, executionProps) ||
                 (lease && lease.expiresAt <= Date.now())) return false;
-            if (executionProps.workbench) gsWorkbench.intent(rawTab.id, 'suspend', executionProps.reason || 'bulk-suspend');
             return true;
           },
         }));
@@ -431,9 +429,6 @@ var gsTabSuspendManager = (function() {
         suspendedUrl = gsUtils.generateSuspendedUrl(currentTab.url, currentTab.title, 0);
       }
       gsUtils.log(currentTab.id, 'Suspending tab');
-      if (executionProps.workbench) {
-        gsWorkbench.intent(currentTab.id, 'suspend', executionProps.reason || 'bulk-suspend');
-      }
       tgs.setTabStatePropForTabId(currentTab.id, tgs.STATE_INITIALISE_SUSPENDED_TAB, true);
       const updatedTab = await gsChrome.tabsUpdate(currentTab.id, { url: suspendedUrl });
       success = updatedTab !== null;
@@ -514,8 +509,10 @@ var gsTabSuspendManager = (function() {
     return true;
   }
 
-  function shouldProtectForms(tabId, forceLevel, workbench) {
-    if (workbench) return true;
+  // props are the queued execution props: { workbench, ignoreDrafts }.
+  function shouldProtectForms(tabId, forceLevel, props) {
+    if (props && props.ignoreDrafts) return false;
+    if (props && props.workbench) return true;
     if (!(forceLevel >= 2)) return false;
     return !gsBrowser.extension.inIncognitoContext && typeof gsWorkbench !== 'undefined' && gsWorkbench.isReady() ?
       !!gsWorkbench.getPolicy(tabId).ignoreForms : !!gsStorage.getOption(gsStorage.IGNORE_FORMS);
@@ -524,15 +521,15 @@ var gsTabSuspendManager = (function() {
   function checkContentScriptEligibilityForSuspension(
     tabInfo,
     forceLevel,
-    workbench,
+    props,
     tabId
   ) {
-    if ((forceLevel >= 2 || workbench) &&
+    if ((forceLevel >= 2 || (props && props.workbench)) && !(props && props.explicit) &&
         (tabInfo.temporaryWhitelist || tabInfo.status === gsUtils.STATUS_TEMPWHITELIST)) {
       return false;
     }
-    if (shouldProtectForms(tabId, forceLevel, workbench) &&
-        (tabInfo.dirty || tabInfo.draftUnverified || tabInfo.status === gsUtils.STATUS_FORMINPUT)) {
+    if (shouldProtectForms(tabId, forceLevel, props) &&
+        (tabInfo.dirty || tabInfo.status === gsUtils.STATUS_FORMINPUT)) {
       return false;
     }
     return true;
