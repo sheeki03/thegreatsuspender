@@ -2,75 +2,47 @@
 
 <img src="/src/img/suspendy-guy.png" width="100px" />
 
-The Great Suspender is an open-source tab suspender and local tab workbench for Brave and Chrome. This fork uses Manifest V3 and real browser tab groups to manage many tabs without discarding the work still happening in them.
+The Great Suspender puts tabs you aren't using to sleep so your browser uses less memory, and lets you find, organise and bring them back easily. This fork runs on Manifest V3 in Brave and Chrome.
 
-Start with the [installation and usage guide](INSTALLATION_GUIDE.md). Workspaces, safe bulk actions, recovery, local activity summaries, and policies are available from the toolbar popup and cross-window dashboard.
+Start with the [installation and usage guide](INSTALLATION_GUIDE.md).
 
-Before replacing or removing an installation, save page drafts, export needed sessions, and restore its suspended tabs. Suspended URLs contain that installation's extension ID. See [recovery and startup behavior](INSTALLATION_GUIDE.md#snapshots-startup-and-bookmarks).
+### Version 8.0.0
 
-### Version 8.0.0 — Tab workbench
+- **One-click popup.** Suspend or wake the current tab, or the tabs you've selected, with one click and an Undo. Keep a tab awake for an hour, until restart, or always for its site. Suspend or wake every other tab in the window, or in all windows.
+- **Your choice wins.** When you suspend a tab yourself, it suspends. The only question is "Suspend anyway?" when you've typed something that may not be saved. Automatic suspension and bulk actions still leave pinned, audio-playing, kept-awake and stay-awake tabs alone.
+- **Automatic suspension** after a set time unused, plus an optional limit on how many tabs stay awake. The least recently used tabs sleep first.
+- **Tab list.** Every tab across windows, with search, Awake/Asleep/Kept-awake filters, one-click Suspend/Wake per row, and a selection bar for Suspend, Wake, Keep awake, Move to workspace, Archive and Close.
+- **Workspaces.** Named sets of tabs you can switch between or put to sleep together, each with an optional suspend timer.
+- **Duplicates.** Find pages open more than once and close the extra copies.
+- **Snapshots and recovery.** Save the list of open tabs manually or on a schedule, and reopen missing tabs later. Suspended tabs lost in an extension crash come back automatically. After a reload, use **Recover lost tabs**.
+- **Archive.** Close tabs but keep them, ready to restore.
+- **Undo** for suspend, wake, archive and close.
 
-The popup, dashboard, and settings share a responsive light/dark interface with keyboard navigation, visible protection reasons, and revalidated bulk previews.
-
-| # | Feature | Behavior |
-| --- | --- | --- |
-| 1 | Tab-count policies | Configurable awake ceiling and target; suspend oldest eligible tabs without overriding protection. |
-| 2 | Timed snooze | Exclude tabs for a duration, until tomorrow, or until the browser restarts. |
-| 3 | Workspaces | Exclusive tab membership and per-workspace suspension-policy overrides with global inheritance. |
-| 4 | Hibernate and switch | Sleep/wake workspaces while retaining native windows, order, pins, groups, and geometry. |
-| 5 | Cross-window search | Match title, URL, site, group, and status; combine window/status/workspace filters. |
-| 6 | Duplicate review | Compare complete URLs, including query and hash; variants stay separate. Choose a survivor safely. |
-| 7 | Unreviewed inbox | Keep, archive, or close new tabs; revisits remove them from the inbox. |
-| 8 | Automatic grouping | Preview domain or topic groupings, then create real per-window native groups. |
-| 9 | Temporary tabs and groups | Archive on expiry; protected overdue tabs remain available for review. |
-| 10 | Unsaved-work protection | Detect trusted paste, IME, contenteditable, dynamic forms, and frame edits; skip unverified pages. |
-| 11 | Meeting/presentation protection | Explicitly keep selected tabs out of destructive actions and automatic policies. |
-| 12 | Undo | Reverse the last suspend, restore, archive, or close operation, with retryable partial results. |
-| 13 | Bulk previews | Show eligible tabs and skip reasons; recheck navigation, drafts, and protection before execution. |
-| 14 | Versioned snapshots | Schedule immutable local snapshots with retention, identity-aware comparisons, and restoration. |
-| 15 | Restore throttling | Configure concurrency and spacing; prioritize foreground/current-workspace restores and wait for native readiness. |
-| 16 | Startup policy | Leave tabs asleep, wake the current workspace, or show a workspace chooser on real browser startup. |
-| 17 | Keyboard navigation | Search shortcuts, complete tab order, roving row navigation, selection, and dialog focus restoration. |
-| 18 | Lifecycle timeline | Local suspend/restore/archive/close events with causes. |
-| 19 | Active-time summaries | Foreground, non-idle time by site and workspace, rather than tab lifetime. |
-| 20 | Policy metrics | Actual tab counts, sleep duration, restore latency, and protection reasons; no invented RAM savings. |
-| 21 | Neglected-tab review | Age-based recommendations with open/review/archive actions. |
-| 22 | Native memory pressure | Optional macOS pressure readings and oldest-eligible suspension at a chosen pressure threshold/target. |
-| 23 | Bookmark workspaces | Import/export native bookmark folders, retaining nested folders and reporting unsupported URLs. |
-
-Recovery preserves supported browser pages awake, including browser-only native groups. Stable tab witnesses, not recycled numeric window IDs, establish continuity. Expired recovery entries remain visible in Archive; retryable failures keep their saved evidence.
+Unsaved-work protection only counts typing the page actually reported. Earlier builds also treated pages as unsafe when they embedded another site's frame or already had a text box. That blocked suspension on most real sites; it no longer does.
 
 ### Install as an extension from source
 
 1. Use Brave or Chrome with Chromium 116 or newer.
 2. Open `brave://extensions/` or `chrome://extensions/` and enable **Developer mode**.
-3. Choose **Load unpacked**.
-4. Select this checkout's `src/` directory. No build is required; do not load an old `build/tgs-temp/src/` copy.
-5. Pin the toolbar icon, open the popup, and open the workbench dashboard and Settings.
+3. Choose **Load unpacked** and select this checkout's `src/` directory. No build is required.
+4. Pin the toolbar icon.
 
-Keep the source directory in place. Before reloading or replacing the extension, save important page drafts, export needed sessions, and restore suspended tabs: Brave can close extension-owned suspended pages during reload. After source updates, use **Reload** on the existing extension card. Moving or repacking the installation can change its ID.
+Keep the source directory in place. Before reloading or replacing the extension, save important page drafts and wake your suspended tabs: Brave can close extension-owned suspended pages during a reload. Moving or repacking the installation can change its ID.
 
 ### Runtime architecture
 
 - `src/worker.js` owns privileged browser APIs and event delivery.
-- `src/engine.html` hosts the DOM-dependent legacy and workbench engine in an offscreen document.
-- `src/js/gsBrowser.js` is the explicit browser-API boundary. UI pages use acknowledged extension-internal commands, not a background-page reference.
-- Tab groups and bookmarks use real native APIs. The old external-extension suspension-message API is not provided.
-- All executable extension code is packaged locally.
+- `src/engine.html` hosts the DOM-dependent suspension engine in an offscreen document. The workbench modules are `gsWorkbench.js` (tab metadata, protection rules, snooze, tab limit), `gsWorkbenchActions.js` (suspend, wake, archive, close, undo, restore), `gsWorkbenchWorkspaces.js` (workspaces and duplicates) and `gsWorkbenchSnapshots.js`.
+- `src/js/gsBrowser.js` is the explicit browser-API boundary. UI pages talk to the engine through extension-internal commands.
+- All executable extension code is packaged locally. The old external-extension suspension-message API is not provided.
 
 ### Local data and privacy
 
-There is no analytics transmission. The workbench does record tab metadata, workspaces, archives, snapshots, lifecycle causes, foreground-active time, and policy metrics in the local browser profile. Activity recording can be disabled in Settings. Draft protection records flags, not editor values; restoration cannot recover unsaved site application state.
-
-Private windows use isolated legacy controls when incognito access is enabled. They are excluded from normal workbench persistence. Legacy preference sync, if enabled, uses browser sync and can include never-suspend rules. Optional clean screenshots fetch the StevenBlack hosts blocklist as filter data and can contain visible page content.
-
-The optional macOS helper receives no tab URLs or page content and runs no background service. See [native helper setup and removal](INSTALLATION_GUIDE.md#optional-macos-memory-pressure-helper); macOS Brave uses Chrome's native-host registry even with a custom browser profile.
+There is no analytics or network reporting. Settings, tab metadata, workspaces, archive, snapshots and the last undo record are stored in the local browser profile. Unsaved-work detection records only a "typed something" flag, never what was typed. Private windows are never stored. Settings sync, if you turn it on, syncs settings (including stay-awake sites) only. The optional "Hide ads in screenshots" setting downloads a public host blocklist from GitHub, and screenshots can contain visible page content.
 
 ### Release verification
 
-All 23 features were exercised in an isolated macOS Brave profile, including real groups/bookmarks, browser restarts, scheduled alarms, protected drafts, undo, throttled restores, and desktop/narrow light/dark UI. Recovery smokes covered browser-only groups, saved geometry, interrupted restores, expired entries, older sessions without stable IDs, unverified private pages, and duplicate sleeping-tab identities after native reordering and offscreen-engine recreation.
-
-A real macOS normal-pressure reading was observed; the warning-pressure action path used a structured test reading rather than forcing system memory exhaustion. All 58 packaged JavaScript source/library/existing-test files passed `node --check`. This is syntax verification plus real-browser smoke coverage, not a claim that the full automated test suite ran.
+Checked in Chrome for Testing (Chromium) with the unpacked `src/` folder, on real sites. Popup: suspend and wake (including stay-awake, kept-awake and pages with embedded frames), Suspend anyway after real typing, keep-awake options, Suspend others and Wake all for this window and all windows, several selected tabs, search, and private windows. Tab list: selection actions, filters, keyboard navigation, Close/Archive with Undo, workspaces (create from selection, switch, sleep, edit, delete), duplicates with Undo, snapshots (save, reopen missing, compare), and archive restore. Settings autosave for every control type. Automatic suspension with a short timer, a tab limit and a stay-awake list. Loading data saved by the previous build. Recovery of lost suspended tabs. Light, dark and narrow layouts. This is real-browser smoke coverage plus `node --check` and ESLint on the changed files, not a full automated test suite. Brave-specific behavior was not re-tested in this pass.
 
 ### Windows Group Policies
 
