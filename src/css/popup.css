@@ -1,32 +1,97 @@
-html { min-width: 360px; }
-body.popup-page { width: 380px; max-width: 100vw; margin: 0 auto; background: var(--surface); font-size: 13px; }
-.popup-header { padding: 15px 16px 12px; border-bottom: 1px solid var(--border); }
-.popup-header .brand img { width: 32px; height: 32px; }
-.popup-header .brand-name { font-size: 14px; }
-.popup-header .brand-name small { font-size: 11px; }
-.popup-main { padding: 14px 16px 12px; max-height: 470px; overflow-y: auto; }
-.popup-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; margin-bottom: 15px; }
-.popup-search input { font-size: 12px; }
-.popup-section { padding: 16px 0; border-top: 1px solid var(--border); }
-.popup-section.current-section { padding-top: 0; border-top: 0; }
-.popup-section h1, .popup-section h2 { font-size: 13px; font-weight: 650; letter-spacing: 0; margin-bottom: 10px; }
-.popup-section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
-.current-tab-title { font-size: 14px; font-weight: 600; margin-bottom: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.current-tab-url { font-size: 11px; color: var(--muted); margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#current-protection { font-size: 12px; margin-bottom: 12px; }
-.popup-section .button-row button { flex: 1 1 auto; font-size: 12px; }
-.popup-section .field { font-size: 12px; margin-bottom: 9px; }
-.popup-section details { margin-top: 13px; font-size: 12px; }
-.popup-section details .field { margin-top: 13px; }
-.popup-section .exclusions { margin-top: 13px; }
-.popup-section .exclusions button { font-size: 11px; }
-#scope-count { font-size: 11px; margin-bottom: 9px; }
-.popup-preview { margin-bottom: 14px; }
-#popup-result { margin-bottom: 14px; }
-#popup-undo { width: 100%; margin-top: 10px; }
-.undo-help { font-size: 11px; color: var(--muted); margin: 8px 0 0; }
-.popup-keyboard-help { margin: 12px 0 0; font-size: 11px; color: var(--muted); }
-.popup-footer { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); background: var(--rail); }
-.popup-footer button:first-child { flex: 1; }
-.popup-footer button { font-size: 12px; }
-@media (max-width: 379px) { body.popup-page { width: 360px; } }
+/* Toolbar popup. One job first: put the current tab to sleep (or wake it).
+   Everything else is one step down the page, or one click away in the workbench. */
+html { min-width: 360px; background: var(--surface); }
+body.popup-page { width: 360px; max-width: 100vw; margin: 0 auto; background: var(--surface); font-size: 13px; }
+
+.segmented span { padding: 3px 9px; font-size: 12px; }
+.popup-main { max-height: 520px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+
+/* Current tab */
+.current { padding: 16px 16px 18px; }
+.current-tab { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 10px; align-items: center; margin-bottom: 14px; }
+.current-favicon { width: 32px; height: 32px; border-radius: 8px; background: var(--rail); display: grid; place-items: center; }
+.current-favicon img { width: 16px; height: 16px; }
+.current-text { min-width: 0; }
+.current-text h1 {
+  font-size: 15px; line-height: 1.35; font-weight: 600; letter-spacing: -.005em; margin: 0;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere;
+}
+.current-meta { display: flex; gap: 6px; align-items: baseline; margin: 2px 0 0; font-size: 12px; color: var(--muted); min-width: 0; }
+.current-meta #current-site { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.current-state { flex: 0 0 auto; font-weight: 600; }
+.current-state:not(:empty)::before { content: "·"; margin-right: 6px; color: var(--muted); font-weight: 400; }
+#current-site:empty + .current-state::before { content: none; }
+.current-state.is-awake { color: var(--success); }
+.current-state.is-asleep { color: var(--accent); }
+.current-state.is-kept { color: var(--warning); }
+
+.hero-action {
+  width: 100%; min-height: 46px; padding: 0 14px; border-radius: 8px; gap: 10px; justify-content: flex-start;
+  background: var(--accent); border-color: var(--accent); color: var(--surface);
+  font-size: 14px; font-weight: 600;
+  transition: background-color 120ms ease-out, transform 120ms ease-out;
+}
+.hero-action:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--surface); }
+.hero-action:active { transform: translateY(1px); background: var(--accent-hover); }
+.hero-action:disabled { opacity: 1; background: var(--rail); border-color: var(--border); color: var(--muted); cursor: default; transform: none; }
+.hero-action .icon { width: 18px; height: 18px; }
+.hero-action #primary-label { flex: 1; text-align: left; }
+.hero-action kbd {
+  font: 500 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: .02em;
+  padding: 4px 6px; border-radius: 4px; background: color-mix(in srgb, var(--surface) 18%, transparent); color: inherit;
+}
+.hero-action[aria-busy="true"] { cursor: progress; }
+.hero-action[aria-busy="true"] .icon { animation: popup-breathe 1.2s ease-in-out infinite; }
+@keyframes popup-breathe { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) {
+  .hero-action, .hero-action[aria-busy="true"] .icon { transition: none; animation: none; }
+}
+
+.current-note { margin: 8px 0 0; font-size: 12px; line-height: 1.45; color: var(--warning); }
+.current-note.is-muted { color: var(--muted); }
+
+.keep-awake { margin-top: 16px; }
+.keep-awake-label { margin: 0 0 6px; font-size: 12px; color: var(--muted); }
+.chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { min-height: 30px; padding: 4px 11px; border-radius: 999px; font-size: 12px; }
+.keep-awake-status {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 10px 8px 12px; border-radius: 8px; background: var(--warning-bg); color: var(--warning); font-size: 12px;
+}
+.keep-awake-status span { min-width: 0; overflow-wrap: anywhere; }
+
+.link-button {
+  min-height: 28px; padding: 2px 6px; border: 0; background: transparent; color: var(--accent); font-weight: 600; font-size: 12px; flex: 0 0 auto;
+}
+.link-button:hover { background: var(--selected); color: var(--accent-hover); }
+.keep-awake-status .link-button { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+.keep-awake-status .link-button:hover { background: transparent; color: inherit; }
+
+/* Other tabs */
+.others { padding: 14px 16px 16px; border-top: 1px solid var(--border); }
+.others-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.others-heading h2 { font-size: 13px; font-weight: 600; margin: 0; }
+.others-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.others-actions button { min-height: 38px; font-weight: 550; }
+.others-count { margin: 8px 0 0; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* Result of the last action */
+.result { margin: 0 16px 14px; padding: 10px 12px; border-radius: 8px; background: var(--selected); font-size: 12px; }
+.result.is-error { background: var(--danger-bg); color: var(--danger); }
+.result-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.result-line p { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.result-actions { display: flex; flex: 0 0 auto; gap: 2px; }
+.result details { margin-top: 6px; }
+.result summary { font-weight: 500; color: var(--muted); font-size: 12px; }
+.result .reason-list { margin: 6px 0 0; max-height: 140px; }
+.result .reason-list li { margin-bottom: 6px; }
+
+/* Footer: the way out to everything else */
+.popup-footer { display: flex; align-items: center; gap: 6px; padding: 10px 12px; border-top: 1px solid var(--border); background: var(--rail); }
+.footer-search { position: relative; flex: 1; min-width: 0; margin: 0; }
+.footer-search .icon { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+.footer-search input:not([type="checkbox"]) { min-height: 32px; padding: 5px 8px 5px 30px; font-size: 12px; }
+.footer-button { min-height: 32px; padding: 4px 10px; font-size: 12px; background: var(--surface); }
+.footer-button.icon-only { width: 32px; padding: 0; }
+
+@media (max-width: 359px) { body.popup-page { width: 100vw; } }
