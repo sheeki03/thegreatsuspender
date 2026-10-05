@@ -5,11 +5,13 @@ var gsWorkbench = (() => {
   const ALARM = 'gs-workbench-minute';
   const defaults = {
     countEnabled: false, awakeLimit: 50, awakeTarget: 40,
-    restoreConcurrency: 3, restoreDelayMs: 300, startupPolicy: 'leave',
     snapshotEnabled: false, snapshotIntervalMinutes: 1440, snapshotKeep: 30,
-    lastSnapshotAt: 0, neglectedDays: 14, theme: 'system',
-    memory: { enabled: false, level: 'critical', target: 20 },
+    lastSnapshotAt: 0, theme: 'system',
   };
+  // Per-tab metadata the workbench still uses. Older installs stored more
+  // (activity, expiry, meeting mode); hydrate() drops the rest.
+  const META_KEYS = ['uid', 'url', 'title', 'windowId', 'windowOrdinal', 'index', 'workspaceId', 'createdAt',
+    'lastViewedAt', 'dirty', 'documentToken', 'tempWhitelist', 'snooze', 'status', 'group'];
   let state = null;
   let ready = false;
   let writing = Promise.resolve();
@@ -25,12 +27,9 @@ var gsWorkbench = (() => {
   let lastVisibleUid = null;
   let activityGeneration = 0;
   let windowGeneration = 0;
-  let idleState = 'active';
   const commands = new Map();
   const tickHandlers = [];
-  const startupHandlers = [];
   const viewHandlers = new Map();
-  const intents = new Map();
   const windowsById = new Map();
   let resolveReady;
   let rejectReady;
@@ -74,23 +73,23 @@ var gsWorkbench = (() => {
     return {
       version: 1, revision: 0, installedAt: Date.now(), browserSession: uuid(),
       currentWorkspaceId: null, settings: clone(defaults), meta: {},
-      workspaces: [], archive: [], temporaryGroups: {}, undo: null,
-      snapshots: [], timeline: [],
-      metrics: { suspensions: 0, restorations: 0, archives: 0, closes: 0,
-        sleepMs: 0, restoreLatencyMs: 0, restoreSamples: 0,
-        protectionSkips: 0, protectionReasons: {}, activityByDay: {} },
-      memory: { connected: false, level: 'unknown', rawLevel: null,
-        checkedAt: null, error: null },
+      workspaces: [], archive: [], undo: null, snapshots: [],
     };
+  }
+  function pick(source, keys) {
+    const result = {};
+    for (const key of keys) if (source && Object.hasOwn(source, key)) result[key] = source[key];
+    return result;
   }
   function hydrate(saved) {
     if (!saved) return initialState();
     if (saved.version !== 1) throw new Error('Unsupported local workspace data version. Export your existing sessions before changing extension versions.');
     const base = initialState();
-    const value = { ...base, ...saved };
-    value.settings = { ...base.settings, ...saved.settings,
-      memory: { ...base.settings.memory, ...(saved.settings && saved.settings.memory) } };
-    value.metrics = { ...base.metrics, ...saved.metrics };
+    const value = { ...base, ...pick(saved, Object.keys(base)) };
+    if (saved.lastCountResult) value.lastCountResult = saved.lastCountResult;
+    value.settings = { ...base.settings, ...pick(saved.settings, Object.keys(defaults)) };
+    value.meta = {};
+    for (const [id, meta] of Object.entries(saved.meta || {})) value.meta[id] = pick(meta, META_KEYS);
     return value;
   }
   function notify() {
@@ -141,29 +140,36 @@ var gsWorkbench = (() => {
     return { ...base, ...(workspace && workspace.policy) };
   }
   function getSuspendMinutes(tabId) { return String(getPolicy(tabId).suspendMinutes); }
+  // Only typing the page reported counts as unsaved work. "Couldn't check" is
+  // not evidence of a draft: most pages embed cross-site frames we can't read.
+  const UNSAVED_REASON = 'Unsaved form or editable content';
+  function draftsProtected(tabId, action, options) {
+    if (options.ignoreDrafts) return false;
+    return !(action === 'suspend' && options.respectSuspensionPolicy) || getPolicy(tabId).ignoreForms;
+  }
   function getProtectionReasonsSync(tab, action = 'suspend', options = {}) {
     if (!normalTab(tab)) return ['Browser, private, or extension page'];
     if (action === 'restore') return [];
     const meta = getMeta(tab.id) || tab.meta || {};
     const policy = getPolicy(tab.id);
-    const legacyPolicy = action === 'suspend' && options.respectSuspensionPolicy;
-    const protectDrafts = !legacyPolicy || policy.ignoreForms;
     const reasons = [];
-    if (meta.tempWhitelist) reasons.push('Temporarily excluded');
-    if (activeUntil(meta.snooze)) reasons.push('Snoozed');
-    if (activeUntil(meta.protection)) reasons.push(meta.protection.kind === 'presentation' ? 'Presentation protection' : 'Meeting protection');
-    if (protectDrafts && (meta.dirty || tab.dirty)) reasons.push('Unsaved form or editable content');
-    if (protectDrafts && (meta.draftUnverified || tab.draftUnverified)) reasons.push('Draft/editor state cannot be verified; reload safely');
-    if ((!legacyPolicy || policy.ignoreAudio) && tab.audible) reasons.push('Playing audio');
+    const protectDrafts = draftsProtected(tab.id, action, options);
+    // An explicit action on tabs the person chose overrides keep-awake rules;
+    // those exist for automatic and bulk suspension. Unsaved typing still counts.
+    const explicit = !!options.explicit;
+    if (meta.tempWhitelist && !explicit) reasons.push('Temporarily excluded');
+    if (activeUntil(meta.snooze) && !explicit) reasons.push('Snoozed');
+    if (protectDrafts && (meta.dirty || tab.dirty)) reasons.push(UNSAVED_REASON);
+    if (!explicit && (!(action === 'suspend' && options.respectSuspensionPolicy) || policy.ignoreAudio) && tab.audible) reasons.push('Playing audio');
     if (action === 'close' || action === 'archive') {
-      if (tab.pinned) reasons.push('Pinned tab');
+      if (tab.pinned && !explicit) reasons.push('Pinned tab');
     } else {
       if (!options.allowActive && (tab.id === focusedTabId || (policy.ignoreActive && tab.active))) reasons.push('Active tab');
-      if (policy.ignorePinned && tab.pinned) reasons.push('Pinned tab');
-      if (gsUtils.checkWhiteList(originalUrl(tab))) reasons.push('Always keep awake');
+      if (!explicit && policy.ignorePinned && tab.pinned) reasons.push('Pinned tab');
+      if (!explicit && gsUtils.checkWhiteList(originalUrl(tab))) reasons.push('Always keep awake');
       if (tab.status === 'loading') reasons.push('Page is still loading');
-      if (gsStorage.getOption(gsStorage.IGNORE_WHEN_OFFLINE) && !navigator.onLine) reasons.push('Browser is offline');
-      if (gsStorage.getOption(gsStorage.IGNORE_WHEN_CHARGING) && tgs.isCharging()) reasons.push('Computer is charging');
+      if (!explicit && gsStorage.getOption(gsStorage.IGNORE_WHEN_OFFLINE) && !navigator.onLine) reasons.push('Browser is offline');
+      if (!explicit && gsStorage.getOption(gsStorage.IGNORE_WHEN_CHARGING) && tgs.isCharging()) reasons.push('Computer is charging');
     }
     return [...new Set(reasons)];
   }
@@ -201,43 +207,37 @@ var gsWorkbench = (() => {
     if (!normalTab(tab)) return reasons;
     try {
       const info = await draftInfo(tab);
-      if (!info || typeof info.dirty !== 'boolean') return [...new Set([...reasons, 'Reload this tab to enable current draft protection'])];
+      if (!info || typeof info.dirty !== 'boolean') return reasons;
       const dirty = info.dirty || info.status === 'formInput';
-      const unverified = !!info.draftUnverified;
       const tempWhitelist = typeof info.temporaryWhitelist === 'boolean'
         ? info.temporaryWhitelist : info.status === 'tempWhitelist';
-      if ((getMeta(tab.id) || {}).dirty !== dirty || !!(getMeta(tab.id) || {}).draftUnverified !== unverified ||
-        !!(getMeta(tab.id) || {}).tempWhitelist !== tempWhitelist || (getMeta(tab.id) || {}).documentToken !== info.documentToken) {
+      const known = getMeta(tab.id) || {};
+      if (known.dirty !== dirty || !!known.tempWhitelist !== tempWhitelist || known.documentToken !== info.documentToken) {
         await update(draft => {
-          if (draft.meta[tab.id]) Object.assign(draft.meta[tab.id], { dirty, draftUnverified: unverified, tempWhitelist, documentToken: info.documentToken });
+          if (draft.meta[tab.id]) Object.assign(draft.meta[tab.id], { dirty, tempWhitelist, documentToken: info.documentToken });
         });
       }
       // Fresh info can clear a submitted/reset form; don't retain a stale cached reason.
-      const fresh = reasons.filter(reason => !['Unsaved form or editable content', 'Draft/editor state cannot be verified; reload safely', 'Temporarily excluded'].includes(reason));
-      if (dirty) fresh.push('Unsaved form or editable content');
-      if (unverified) fresh.push('Draft/editor state cannot be verified; reload safely');
-      if (tempWhitelist) fresh.push('Temporarily excluded');
+      const fresh = reasons.filter(reason => ![UNSAVED_REASON, 'Temporarily excluded'].includes(reason));
+      if (dirty && draftsProtected(tab.id, action, options)) fresh.push(UNSAVED_REASON);
+      if (tempWhitelist && !options.explicit) fresh.push('Temporarily excluded');
       return [...new Set(fresh)];
     } catch (_) {
-      return [...new Set([...reasons, 'Unable to verify editable content'])];
+      // A page that can't answer is treated like the original extension did: not dirty.
+      return reasons;
     }
   }
-  function newMeta(tab, isNew) {
+  function newMeta(tab) {
     const url = originalUrl(tab);
-    const status = tabStatus(tab);
     return {
       uid: uuid(), url, title: tab.title || url, windowId: tab.windowId, windowOrdinal: 0, index: tab.index,
       workspaceId: null, createdAt: createdTabs.get(tab.id) || Date.now(),
       lastViewedAt: Number.isFinite(tab.lastAccessed) ? tab.lastAccessed : null,
-      reviewedAt: null, visitCount: 0, isNew: !!isNew, dirty: false,
-      draftUnverified: status === 'awake' || status === 'loading', documentToken: null, tempWhitelist: false,
-      snooze: null, protection: null, expiresAt: null,
-      suspendedAt: status === 'suspended' || status === 'discarded' ? Date.now() : null,
-      pendingSleepMs: 0, pendingRestore: false, sleepMs: 0, status,
+      dirty: false, documentToken: null, tempWhitelist: false, snooze: null, status: tabStatus(tab),
     };
   }
   function rowFrom(tab, groups) {
-    const meta = getMeta(tab.id) || newMeta(tab, false);
+    const meta = getMeta(tab.id) || newMeta(tab);
     const group = groups && groups.get(tab.groupId);
     const workspace = state.workspaces.find(item => item.id === meta.workspaceId);
     const status = tabStatus(tab);
@@ -252,13 +252,10 @@ var gsWorkbench = (() => {
       groupCollapsed: group ? group.collapsed : false,
       groupStartIndex: group ? group.startIndex : tab.index,
       groupKey: group ? group.key : null,
-      workspaceId: meta.workspaceId, workspaceName: workspace ? workspace.name : 'Unassigned',
-      createdAt: meta.createdAt, lastViewedAt: meta.lastViewedAt, reviewedAt: meta.reviewedAt,
-      visitCount: meta.visitCount, isNew: meta.isNew, snooze: meta.snooze,
-      protection: meta.protection, expiresAt: meta.expiresAt, dirty: meta.dirty,
-      draftUnverified: meta.draftUnverified, meta,
+      workspaceId: meta.workspaceId, workspaceName: workspace ? workspace.name : '',
+      createdAt: meta.createdAt, lastViewedAt: meta.lastViewedAt,
+      snooze: activeUntil(meta.snooze) ? meta.snooze : null, dirty: meta.dirty, meta,
     };
-    row.expiresAt = gsWorkbenchWorkspaces.getTemporaryInfo(row, state).expiresAt;
     row.protectionReasons = getProtectionReasonsSync(row);
     return row;
   }
@@ -311,15 +308,12 @@ var gsWorkbench = (() => {
         const ids = [];
         for (const tab of missing) {
           if (draft.meta[tab.id]) continue;
-          draft.meta[tab.id] = newMeta(tab, createdTabs.has(tab.id));
+          draft.meta[tab.id] = newMeta(tab);
           ids.push(tab.id);
         }
         return ids;
       });
-      for (const id of added) {
-        createdTabs.delete(id);
-        await record('opened', rowFrom(managed.find(tab => tab.id === id), byGroup), 'Opened in browser');
-      }
+      for (const id of added) createdTabs.delete(id);
     }
     const rows = managed.map(tab => rowFrom(tab, byGroup));
     const witnesses = new Map();
@@ -331,12 +325,10 @@ var gsWorkbench = (() => {
     return rows;
   }
   function tabSnapshot(row) {
-    const groupExpiry = gsWorkbenchWorkspaces.getTemporaryInfo(row, state).groupExpiresAt;
     const group = row.groupId >= 0 ? {
       sourceId: row.groupId, key: row.groupKey || `${state.browserSession}:${row.windowId}:${row.groupId}`,
       startIndex: row.groupStartIndex ?? row.index,
       title: row.groupTitle || '', color: row.groupColor || 'grey', collapsed: !!row.groupCollapsed,
-      temporaryExpiresAt: groupExpiry,
     } : null;
     const window = row.window || windowsById.get(row.windowId) || {};
     return gsWorkbenchWorkspaces.decorateSnapshot({
@@ -367,12 +359,6 @@ var gsWorkbench = (() => {
         }
         if (!workspace) { meta.group = clone(snapshot.group); continue; }
         const index = workspace.savedTabs.findIndex(item => item.uid === snapshot.uid);
-        const previous = index >= 0 ? workspace.savedTabs[index] : null;
-        if (previous && previous.group && snapshot.group && previous.group.title === snapshot.group.title) {
-          for (const key of ['bookmarkPath', 'bookmarkPathIds']) {
-            if (previous.group[key]) snapshot.group[key] = clone(previous.group[key]);
-          }
-        }
         meta.group = clone(snapshot.group);
         if (index >= 0) workspace.savedTabs[index] = snapshot;
         else workspace.savedTabs.push(snapshot);
@@ -384,35 +370,23 @@ var gsWorkbench = (() => {
   async function attachMeta(tabId, snapshot) {
     const tab = await call(gsBrowser.tabs, 'get', tabId);
     return update(draft => {
-      const meta = { ...newMeta(tab, false), ...(snapshot.meta || {}),
+      const meta = { ...newMeta(tab), ...pick(snapshot.meta || {}, META_KEYS),
         uid: snapshot.uid || snapshot.meta && snapshot.meta.uid || uuid(),
         url: snapshot.originalUrl || originalUrl(tab), title: snapshot.title || tab.title,
-        windowId: tab.windowId, index: tab.index, status: tabStatus(tab), dirty: false, draftUnverified: false,
-        tempWhitelist: false, documentToken: null, pendingSleepMs: 0, pendingRestore: false };
+        windowId: tab.windowId, index: tab.index, status: tabStatus(tab), dirty: false,
+        tempWhitelist: false, documentToken: null };
       const current = draft.meta[tabId];
       if (current && current.uid === meta.uid && current.url === meta.url) {
         meta.dirty = current.dirty;
-        meta.draftUnverified = current.draftUnverified;
         meta.tempWhitelist = current.tempWhitelist;
         meta.documentToken = current.documentToken;
         meta.snooze = current.snooze;
-        meta.protection = current.protection;
-        meta.sleepMs = current.sleepMs;
-        meta.pendingSleepMs = current.pendingSleepMs || 0;
-        meta.pendingRestore = !!current.pendingRestore;
         meta.lastViewedAt = current.lastViewedAt;
-        meta.visitCount = current.visitCount;
-        meta.reviewedAt = current.reviewedAt;
       }
       if (Object.entries(draft.meta).some(([id, other]) => Number(id) !== tabId && other.uid === meta.uid)) {
         throw new Error('Cannot attach the same saved tab identity to two live tabs.');
       }
       if (meta.snooze && meta.snooze.session && meta.snooze.session !== draft.browserSession) meta.snooze = null;
-      if (meta.protection && meta.protection.session && meta.protection.session !== draft.browserSession) meta.protection = null;
-      if (meta.status === 'suspended' || meta.status === 'discarded') {
-        meta.suspendedAt = current && current.uid === meta.uid && current.url === meta.url && current.suspendedAt || Date.now();
-      }
-      else meta.suspendedAt = null;
       draft.meta[tabId] = meta;
       let workspace = draft.workspaces.find(item => item.id === meta.workspaceId);
       if (meta.workspaceId && !workspace) {
@@ -433,41 +407,25 @@ var gsWorkbench = (() => {
     commands.set(command, handler);
   }
   function registerTick(handler) { tickHandlers.push(handler); }
-  function registerStartup(handler) { startupHandlers.push(handler); }
   function registerView(name, handler) { viewHandlers.set(name, handler); }
   async function execute(command, payload = {}, sender) {
     await readyPromise;
     if (gsBrowser.extension.inIncognitoContext && command !== 'view.get' && !command.startsWith('legacy.')) {
-      throw new Error('Workspace and activity features are disabled in private windows.');
+      throw new Error('Workspaces, snooze and undo are not available in private windows.');
     }
     const handler = commands.get(command);
     if (!handler) throw new Error(`Unknown workspace command: ${command}`);
     return handler(payload || {}, sender);
-  }
-  function intent(tabId, action, reason) {
-    intents.set(tabId, { action, reason: reason || action, at: Date.now(), sleepMs: (getMeta(tabId) || {}).pendingSleepMs || 0 });
-  }
-  function record(type, row, reason, extra = {}) {
-    return gsWorkbenchInsights.record(type, row, reason, extra);
-  }
-  async function recordCompletedRestore(row, cause, fallbackReason) {
-    const details = { consumePendingSleep: true };
-    if (cause && cause.action === 'restore' && Number.isFinite(cause.at)) {
-      details.restoreLatencyMs = Math.max(0, Date.now() - cause.at);
-    }
-    await record('restored', row, cause ? cause.reason : fallbackReason, details);
-    if (intents.get(row.id) === cause) intents.delete(row.id);
   }
   function shouldPreventAutoDiscard(tab, report) {
     const meta = getMeta(tab.id) || {};
     const policy = getPolicy(tab.id);
     if (report && meta.documentToken && report.documentToken !== meta.documentToken) report = null;
     const dirty = report && typeof report.dirty === 'boolean' ? report.dirty : meta.dirty;
-    const unverified = report && typeof report.draftUnverified === 'boolean' ? report.draftUnverified : meta.draftUnverified;
     const temporary = report ? (typeof report.temporaryWhitelist === 'boolean'
       ? report.temporaryWhitelist : report.status === 'tempWhitelist') : meta.tempWhitelist;
-    return activeUntil(meta.snooze) || activeUntil(meta.protection) || !!temporary ||
-      (policy.ignoreForms && (dirty || unverified)) || gsUtils.checkWhiteList(originalUrl(tab));
+    return activeUntil(meta.snooze) || !!temporary ||
+      (policy.ignoreForms && dirty) || gsUtils.checkWhiteList(originalUrl(tab));
   }
   async function syncAutoDiscardProtection(tabIds) {
     const selected = tabIds ? new Set(tabIds) : null;
@@ -501,25 +459,22 @@ var gsWorkbench = (() => {
     if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Invalid settings.');
     const allowed = Object.keys(defaults);
     for (const key of Object.keys(patch)) if (!allowed.includes(key)) throw new Error(`Unknown setting: ${key}`);
-    const next = { ...current, ...patch, memory: { ...current.memory, ...patch.memory } };
+    const next = { ...current, ...patch };
     for (const key of ['countEnabled', 'snapshotEnabled']) if (typeof next[key] !== 'boolean') throw new Error(`Invalid ${key}.`);
-    for (const [key, minimum, maximum] of [
-      ['awakeLimit', 2, 10000], ['awakeTarget', 1, 9999], ['restoreConcurrency', 1, 10],
-      ['restoreDelayMs', 0, 10000], ['snapshotIntervalMinutes', 1, 43200],
-      ['snapshotKeep', 1, 100], ['neglectedDays', 1, 3650],
-    ]) if (!Number.isInteger(next[key]) || next[key] < minimum || next[key] > maximum) throw new Error(`${key} must be an integer from ${minimum} to ${maximum}.`);
-    if (next.awakeTarget >= next.awakeLimit) throw new Error('The awake target must be lower than the awake ceiling.');
-    if (!['leave', 'current', 'choose'].includes(next.startupPolicy)) throw new Error('Invalid startup policy.');
+    for (const [key, minimum, maximum, label] of [
+      ['awakeLimit', 2, 10000, 'The tab limit'], ['awakeTarget', 1, 9999, 'The number to keep awake'],
+      ['snapshotIntervalMinutes', 1, 43200, 'The snapshot interval'], ['snapshotKeep', 1, 100, 'The number of snapshots to keep'],
+    ]) if (!Number.isInteger(next[key]) || next[key] < minimum || next[key] > maximum) throw new Error(`${label} must be a whole number from ${minimum} to ${maximum}.`);
+    if (next.awakeTarget >= next.awakeLimit) throw new Error('Keep fewer tabs awake than the limit, so there is room before it triggers again.');
     if (!['system', 'light', 'dark'].includes(next.theme)) throw new Error('Invalid theme.');
-    if (typeof next.memory.enabled !== 'boolean' || !['warning', 'critical'].includes(next.memory.level) ||
-      !Number.isInteger(next.memory.target) || next.memory.target < 1 || next.memory.target > 10000) throw new Error('Invalid native memory policy.');
     if (!Number.isFinite(next.lastSnapshotAt) || next.lastSnapshotAt < 0) throw new Error('Invalid snapshot date.');
     return next;
   }
-  function setProtection(kind, payload) {
+  // Snooze keeps tabs out of automatic suspension until a time or the next browser restart.
+  function setSnooze(payload, clear) {
     const ids = selectedIds(payload);
     let value = null;
-    if (kind !== 'clear') {
+    if (!clear) {
       let until = null;
       let session = null;
       if (payload.mode === 'restart') session = state.browserSession;
@@ -535,27 +490,21 @@ var gsWorkbench = (() => {
         if (!Number.isFinite(payload.minutes) || payload.minutes <= 0) throw new Error('Enter a positive duration in minutes.');
         until = Date.now() + payload.minutes * 60000;
       }
-      if (kind === 'snooze' && !until && !session) throw new Error('Choose a snooze duration or browser restart.');
-      value = kind === 'snooze' ? { until, session } : { kind: payload.kind, until, session };
-      if (kind === 'protection' && !['meeting', 'presentation'].includes(payload.kind)) throw new Error('Choose meeting or presentation protection.');
+      if (!until && !session) throw new Error('Choose how long to keep the tab awake.');
+      value = { until, session };
     }
     return update(draft => {
       const changed = [];
       for (const id of ids) {
         const meta = draft.meta[id];
         if (!meta) continue;
-        meta[payload.field || kind] = value ? clone(value) : null;
+        meta.snooze = value ? clone(value) : null;
         changed.push(id);
       }
       return { changed, until: value && value.until, session: value && value.session };
     }).then(async result => {
       await syncAutoDiscardProtection(result.changed);
       refreshTimers(result.changed);
-      const rows = await getTabs();
-      for (const row of rows.filter(item => result.changed.includes(item.id))) {
-        await record(kind === 'snooze' || payload.field === 'snooze' ? 'snoozed' : 'protected', row,
-          kind === 'clear' ? 'Protection ended by you' : kind === 'snooze' ? 'Snoozed by you' : `${payload.kind} protection`, { until: result.until });
-      }
       return result;
     });
   }
@@ -623,48 +572,43 @@ var gsWorkbench = (() => {
     console.error('Tab workbench:', error);
     if (state) update(draft => { draft.lastError = { message: error.message || String(error), at: Date.now() }; }).catch(console.error);
   }
+  // Tracks the focused tab (it is never auto-suspended) and when each tab was
+  // last viewed, so the tab limit suspends the least recently used tabs first.
   async function activityBoundary() {
     if (!ready || gsBrowser.extension.inIncognitoContext) return;
     const generation = ++activityGeneration;
     const windowId = focusedWindowId;
-    if (windowId === gsBrowser.windows.WINDOW_ID_NONE || idleState === 'locked') {
+    if (windowId === gsBrowser.windows.WINDOW_ID_NONE) {
       lastVisibleUid = null;
       focusedTabId = null;
-      return gsWorkbenchInsights.onActivityChange(null);
+      return;
     }
     const tabs = await call(gsBrowser.tabs, 'query', { active: true, windowId });
     if (generation !== activityGeneration || windowId !== focusedWindowId) return;
     const tab = tabs[0];
-    const row = tab && normalTab(tab) ? (await getTabs()).find(item => item.id === tab.id) : null;
-    if (generation !== activityGeneration || windowId !== focusedWindowId) return;
     focusedTabId = tab ? tab.id : null;
-    if (row && row.uid !== lastVisibleUid) {
-      lastVisibleUid = row.uid;
-      await update(draft => {
-        if (generation !== activityGeneration) return;
-        const meta = draft.meta[row.id];
-        if (!meta || meta.uid !== row.uid) return;
-        meta.lastViewedAt = Date.now();
-        meta.visitCount = (meta.visitCount || 0) + 1;
-        const workspace = draft.workspaces.find(item => item.id === meta.workspaceId);
-        const saved = workspace && workspace.savedTabs.find(item => item.uid === meta.uid);
-        if (saved) Object.assign(saved.meta, { lastViewedAt: meta.lastViewedAt, visitCount: meta.visitCount });
-      });
-    } else if (!row) lastVisibleUid = null;
-    if (generation !== activityGeneration || windowId !== focusedWindowId) return;
-    return gsWorkbenchInsights.onActivityChange(idleState === 'active' ? row || null : null);
+    const meta = tab && normalTab(tab) ? getMeta(tab.id) : null;
+    if (!meta) { lastVisibleUid = null; return; }
+    if (meta.uid === lastVisibleUid) return;
+    lastVisibleUid = meta.uid;
+    await update(draft => {
+      const current = draft.meta[tab.id];
+      if (!current || current.uid !== meta.uid) return;
+      current.lastViewedAt = Date.now();
+      const workspace = draft.workspaces.find(item => item.id === current.workspaceId);
+      const saved = workspace && workspace.savedTabs.find(item => item.uid === current.uid);
+      if (saved && saved.meta) saved.meta.lastViewedAt = current.lastViewedAt;
+    });
   }
   async function tick(now = Date.now()) {
     await readyPromise;
     if (tickRunning) return tickRunning;
     tickRunning = (async () => {
-      const expired = Object.values(state.meta).some(meta =>
-        (meta.snooze && !activeUntil(meta.snooze, now)) || (meta.protection && !activeUntil(meta.protection, now)));
+      const expired = Object.values(state.meta).some(meta => meta.snooze && !activeUntil(meta.snooze, now));
       if (expired) {
         await update(draft => {
           for (const meta of Object.values(draft.meta)) {
             if (meta.snooze && !activeUntil(meta.snooze, now)) meta.snooze = null;
-            if (meta.protection && !activeUntil(meta.protection, now)) meta.protection = null;
           }
         });
         refreshTimers();
@@ -684,11 +628,9 @@ var gsWorkbench = (() => {
         draft.browserSession = uuid();
         for (const meta of Object.values(draft.meta)) {
           if (meta.snooze && meta.snooze.session) meta.snooze = null;
-          if (meta.protection && meta.protection.session) meta.protection = null;
         }
       });
       refreshTimers();
-      for (const handler of startupHandlers) await handler();
     })();
     try { await starting; }
     finally { starting = null; }
@@ -726,21 +668,10 @@ var gsWorkbench = (() => {
         if (!match) match = old.find(entry => available(entry) && entry[1].url === url &&
           entry[1].windowOrdinal === (windowsById.get(tab.windowId) || {}).ordinal && entry[1].index === tab.index);
         if (!match) match = old.find(entry => available(entry) && entry[1].url === url);
-        const meta = match ? clone(match[1]) : newMeta(tab, false);
+        const meta = match ? clone(match[1]) : newMeta(tab);
         if (match) used.add(match[0]);
-        const wasAsleep = meta.status === 'suspended' || meta.status === 'discarded';
-        const status = tabStatus(tab);
-        if (wasAsleep && status !== 'suspended' && status !== 'discarded') {
-          const elapsed = meta.suspendedAt ? Math.max(0, Date.now() - meta.suspendedAt) : 0;
-          meta.sleepMs = (meta.sleepMs || 0) + elapsed;
-          meta.pendingSleepMs = (meta.pendingSleepMs || 0) + elapsed;
-          meta.pendingRestore = true;
-          meta.suspendedAt = null;
-        }
-        if (meta.pendingSleepMs > 0) meta.pendingRestore = true;
         Object.assign(meta, { url, windowId: tab.windowId, index: tab.index,
-          windowOrdinal: (windowsById.get(tab.windowId) || {}).ordinal || 0, status });
-        if ((meta.status === 'suspended' || meta.status === 'discarded') && !meta.suspendedAt) meta.suspendedAt = Date.now();
+          windowOrdinal: (windowsById.get(tab.windowId) || {}).ordinal || 0, status: tabStatus(tab) });
         next[tab.id] = meta;
       }
       draft.meta = next;
@@ -748,14 +679,14 @@ var gsWorkbench = (() => {
     const active = raw.find(tab => tab.windowId === focusedWindowId && tab.active);
     focusedTabId = active ? active.id : null;
   }
-  async function observeTab(tab, created) {
+  async function observeTab(tab) {
     if (!normalTab(tab)) {
       if (tab.id === focusedTabId) await activityBoundary();
       return;
     }
     const change = await update(draft => {
       const previous = draft.meta[tab.id];
-      const meta = previous || newMeta(tab, !!created || createdTabs.has(tab.id));
+      const meta = previous || newMeta(tab);
       const previousStatus = previous && previous.status;
       const status = tabStatus(tab);
       const previousUrl = meta.url;
@@ -763,65 +694,32 @@ var gsWorkbench = (() => {
       meta.title = gsUtils.isSuspendedTab(tab) ? meta.title : tab.title || meta.title;
       Object.assign(meta, { url, status, windowId: tab.windowId, index: tab.index,
         windowOrdinal: (windowsById.get(tab.windowId) || {}).ordinal || 0 });
-      if ((previousUrl !== url && status !== 'suspended') || (status === 'loading' && previousStatus !== 'loading')) {
-        meta.dirty = false;
-        meta.draftUnverified = true;
-        meta.tempWhitelist = false;
-        meta.documentToken = null;
-      }
       const asleep = status === 'suspended' || status === 'discarded';
-      const wasAsleep = previousStatus === 'suspended' || previousStatus === 'discarded';
-      let sleepMs = 0;
-      if (asleep && !wasAsleep) {
-        meta.suspendedAt = Date.now();
+      // A new document, or a sleeping one, has no typing in it yet.
+      if ((previousUrl !== url && status !== 'suspended') || (status === 'loading' && previousStatus !== 'loading') ||
+          (asleep && previousStatus !== status)) {
         meta.dirty = false;
-        meta.draftUnverified = false;
         meta.tempWhitelist = false;
         meta.documentToken = null;
-      }
-      if (!asleep && wasAsleep) {
-        sleepMs = meta.suspendedAt ? Math.max(0, Date.now() - meta.suspendedAt) : 0;
-        meta.sleepMs = (meta.sleepMs || 0) + sleepMs;
-        meta.pendingSleepMs = (meta.pendingSleepMs || 0) + sleepMs;
-        meta.pendingRestore = true;
-        meta.suspendedAt = null;
       }
       draft.meta[tab.id] = meta;
-      return { opened: !previous, previousStatus, status, asleep, wasAsleep, sleepMs, urlChanged: previousUrl !== url };
+      return { previousStatus, status, urlChanged: previousUrl !== url };
     });
     createdTabs.delete(tab.id);
     const row = (await getTabs()).find(item => item.id === tab.id);
     if (!row) return;
     await rememberRows([row]);
-    if (change.opened) await record('opened', row, created ? 'Opened in browser' : 'Page opened');
-    if (change.asleep !== change.wasAsleep && change.previousStatus) {
-      const cause = intents.get(tab.id);
-      const legacyReason = tgs.getTabStatePropForTabId(tab.id, tgs.STATE_SUSPEND_REASON);
-      const reason = cause ? cause.reason : change.asleep ?
-        legacyReason === 1 ? 'Inactivity timer' : legacyReason === 3 || row.status === 'discarded' ? 'Browser discard' : 'Manual suspension' : 'Opened or reloaded suspended tab';
-      if (change.asleep) {
-        await record('suspended', row, reason, { status: row.status });
-        intents.delete(tab.id);
-      } else if (change.status !== 'loading') {
-        await recordCompletedRestore(row, cause, reason);
-      } else {
-        intents.set(tab.id, { ...(cause || { action: 'restore', reason, at: Date.now() }), sleepMs: change.sleepMs });
-      }
-    } else if (change.status === 'awake' && (row.meta.pendingRestore || row.meta.pendingSleepMs > 0)) {
-      const cause = intents.get(tab.id);
-      await recordCompletedRestore(row, cause, 'Restore completed after extension reload');
-    }
     if (tab.id === focusedTabId && (change.urlChanged || change.status !== change.previousStatus)) await activityBoundary();
     scheduleCounts();
   }
   function installEvents() {
     gsBrowser.tabs.onCreated.addListener(tab => {
       if (!tab.incognito) createdTabs.set(tab.id, Date.now());
-      readyPromise.then(() => observeTab(tab, true)).catch(reportError);
+      readyPromise.then(() => observeTab(tab)).catch(reportError);
     });
     gsBrowser.tabs.onUpdated.addListener((tabId, changes, tab) => {
       if (Object.keys(changes).some(key => ['url', 'status', 'discarded', 'title', 'pinned', 'audible', 'groupId'].includes(key))) {
-        readyPromise.then(() => observeTab(tab, false)).catch(reportError);
+        readyPromise.then(() => observeTab(tab)).catch(reportError);
       }
     });
     gsBrowser.tabs.onActivated.addListener(info => {
@@ -856,26 +754,15 @@ var gsWorkbench = (() => {
         }
       })).catch(reportError);
     });
-    gsBrowser.idle.onStateChanged.addListener(value => {
-      ++activityGeneration;
-      idleState = value;
-      readyPromise.then(activityBoundary).catch(reportError);
-    });
     gsBrowser.tabs.onRemoved.addListener(tabId => {
       readyPromise.then(async () => {
         createdTabs.delete(tabId);
-        const cause = intents.get(tabId);
-        intents.delete(tabId);
         const meta = await update(draft => {
           const removed = draft.meta[tabId];
           delete draft.meta[tabId];
           return removed;
         });
         if (!meta) return;
-        const row = { id: tabId, uid: meta.uid, title: meta.title, originalUrl: meta.url,
-          domain: domainOf(meta.url), workspaceId: meta.workspaceId, meta };
-        const sleepMs = (meta.suspendedAt ? Math.max(0, Date.now() - meta.suspendedAt) : 0) + (meta.pendingSleepMs || 0);
-        await record('closed', row, cause ? cause.reason : 'Closed in browser', { sleepMs });
         if (tabId === focusedTabId) await activityBoundary();
         scheduleCounts();
       }).catch(reportError);
@@ -885,7 +772,6 @@ var gsWorkbench = (() => {
         await update(draft => {
           if (draft.meta[removedId]) { draft.meta[addedId] = draft.meta[removedId]; delete draft.meta[removedId]; }
         });
-        if (intents.has(removedId)) { intents.set(addedId, intents.get(removedId)); intents.delete(removedId); }
         if (focusedTabId === removedId) focusedTabId = addedId;
       }).catch(reportError);
     });
@@ -904,9 +790,7 @@ var gsWorkbench = (() => {
     register('view.get', view);
     register('settings.update', async payload => {
       await update(draft => { draft.settings = validateSettings(payload.settings, draft.settings); });
-      if (payload.settings.memory && typeof gsWorkbenchMemory.reconcile === 'function') await gsWorkbenchMemory.reconcile();
       refreshTimers();
-      await activityBoundary();
       scheduleCounts();
       return clone(state.settings);
     });
@@ -925,10 +809,8 @@ var gsWorkbench = (() => {
       notify();
       return clone(gsStorage.getSettings());
     });
-    register('snooze.set', payload => setProtection('snooze', payload));
-    register('snooze.clear', payload => setProtection('clear', { ...payload, field: 'snooze' }));
-    register('protection.set', payload => setProtection('protection', payload));
-    register('protection.clear', payload => setProtection('clear', { ...payload, field: 'protection' }));
+    register('snooze.set', payload => setSnooze(payload, false));
+    register('snooze.clear', payload => setSnooze(payload, true));
     register('counts.enforce', enforceCounts);
   }
   function initAsPromised() {
@@ -948,17 +830,9 @@ var gsWorkbench = (() => {
       installCommands();
       await gsWorkbenchActions.initAsPromised();
       await gsWorkbenchWorkspaces.initAsPromised();
-      await gsWorkbenchInsights.initAsPromised();
-      await gsWorkbenchMemory.initAsPromised();
+      await gsWorkbenchSnapshots.initAsPromised();
       await gsSession.completeStartupRecovery();
-      for (const row of await getTabs()) {
-        if (row.status === 'awake' && (row.meta.pendingRestore || row.meta.pendingSleepMs > 0)) {
-          await recordCompletedRestore(row, null, 'Restore completed after extension reload');
-        }
-      }
       installEvents();
-      gsBrowser.idle.setDetectionInterval(60);
-      idleState = await call(gsBrowser.idle, 'queryState', 60);
       ready = true;
       resolveReady();
       gsBrowser.alarms.create(ALARM, { delayInMinutes: 1, periodInMinutes: 1 });
@@ -983,12 +857,12 @@ var gsWorkbench = (() => {
           const info = await draftInfo(tab);
           if (!info || info.documentToken !== request.documentToken) return;
           const previous = getMeta(tab.id);
-          if (!previous || (previous.dirty === !!info.dirty && previous.draftUnverified === !!info.draftUnverified &&
+          if (!previous || (previous.dirty === !!info.dirty &&
             previous.tempWhitelist === !!info.temporaryWhitelist && previous.documentToken === info.documentToken)) return;
           await update(draft => {
             const meta = draft.meta[tab.id];
             if (!meta || meta.url !== originalUrl(tab)) return;
-            Object.assign(meta, { dirty: !!info.dirty, draftUnverified: !!info.draftUnverified,
+            Object.assign(meta, { dirty: !!info.dirty,
               documentToken: info.documentToken, tempWhitelist: !!info.temporaryWhitelist });
           });
           await syncAutoDiscardProtection([tab.id]);
@@ -1008,6 +882,5 @@ var gsWorkbench = (() => {
   });
   return { initAsPromised, isReady: () => ready, getState, getMeta, update, getTabs, tabSnapshot,
     attachMeta, getPolicy, getSuspendMinutes, getProtectionReasonsSync, getProtectionReasons,
-    register, registerTick, registerStartup, registerView, execute, tick, record, intent,
-    refreshTimers, notify, activityBoundary, shouldPreventAutoDiscard };
+    register, registerTick, registerView, execute, tick, refreshTimers, notify, shouldPreventAutoDiscard };
 })();

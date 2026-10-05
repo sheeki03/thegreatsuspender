@@ -74,13 +74,7 @@ var gsSession = (function() {
     tabs.forEach((tab, index) => {
       if (entries[index].group || tab.pinned || !(tab.groupId >= 0)) return;
       const member = entries.find(entry => entry.group && entry.group.sourceId === tab.groupId);
-      if (member) {
-        entries[index].group = copy(member.group);
-        if (isBrowserPageEntry(entries[index])) {
-          delete entries[index].group.temporaryId;
-          delete entries[index].group.temporaryExpiresAt;
-        }
-      }
+      if (member) entries[index].group = copy(member.group);
     });
     const witnesses = [...new Set(entries.flatMap(entry =>
       [entry.uid, ...(entry.windowWitnessUids || [])]).filter(Boolean))];
@@ -544,30 +538,6 @@ var gsSession = (function() {
     return true;
   }
 
-  function isOverdueRecoveryEntry(entry, now = Date.now()) {
-    const expiry = gsWorkbenchWorkspaces.getSavedTemporaryInfo(entry).expiresAt;
-    return !!expiry && expiry <= now;
-  }
-
-  async function retainExpiredRecovery(entries, sourceSessionId) {
-    if (!entries.length) return;
-    const archiveId = 'legacy-recovery-expired:' + sourceSessionId;
-    const key = entry => (entry.uid || entry.windowId + ':' + entry.tabId) + '\n' + entry.originalUrl;
-    await gsWorkbench.update(state => {
-      let archive = state.archive.find(item => item.id === archiveId);
-      if (!archive) {
-        archive = { id: archiveId, label: 'Expired recovery tabs', reason: 'startup-recovery-expired', createdAt: Date.now(), tabs: [] };
-        state.archive.push(archive);
-      }
-      const retained = new Set(archive.tabs.map(key));
-      for (const entry of entries) {
-        if (retained.has(key(entry))) continue;
-        archive.tabs.push(copy(entry));
-        retained.add(key(entry));
-      }
-    });
-  }
-
   async function settlePendingRecovery(sessionWindow, restoredEntries = [], restoredRows = []) {
     const session = pendingRecovery;
     if (!session || recoveryInFlight) return;
@@ -587,7 +557,6 @@ var gsSession = (function() {
       sessionEntries({ ...window, tabs: window.tabs.filter(tab => gsUtils.isNormalTab(tab) || gsUtils.isSuspendedTab(tab)) }, null, ordinal));
     const live = await gsWorkbench.getTabs();
     const used = new Set();
-    const expired = [];
     let unresolved = false;
     for (const entry of saved) {
       const row = entry.uid ? live.find(item => item.uid === entry.uid) :
@@ -596,11 +565,9 @@ var gsSession = (function() {
         used.add(row.id);
         if (entry.asleep && row.status === 'loading') unresolved = true;
       } else if (entry.asleep) {
-        if (isOverdueRecoveryEntry(entry)) expired.push(entry);
-        else unresolved = true;
+        unresolved = true;
       }
     }
-    await retainExpiredRecovery(expired, session.sessionId);
     if (unresolved || pendingRecovery !== session) return;
     pendingRecovery = null;
     if ((gsWorkbench.getState().lastError || {}).message && gsWorkbench.getState().lastError.message.startsWith('Startup recovery is incomplete:')) {
@@ -645,13 +612,11 @@ var gsSession = (function() {
         missing.push(entry);
       }
     }
-    const expired = missing.filter(entry => isOverdueRecoveryEntry(entry));
-    const recoverable = missing.filter(entry => !expired.includes(entry));
-    await retainExpiredRecovery(expired, session.sessionId);
+    const recoverable = missing;
     const groupKey = entry => entry.group && entry.windowId + ':' +
       (entry.group.key || entry.group.sourceId || entry.group.title + ':' + entry.group.color);
     const affectedGroups = new Set(recoverable.map(groupKey).filter(Boolean));
-    const anchors = surviving.filter(entry => !entry.pinned && affectedGroups.has(groupKey(entry)) && !isOverdueRecoveryEntry(entry));
+    const anchors = surviving.filter(entry => !entry.pinned && affectedGroups.has(groupKey(entry)));
     let restored;
     recoveryInFlight += 1;
     try {
@@ -662,11 +627,8 @@ var gsSession = (function() {
       recoveryInFlight -= 1;
     }
     startupRecoveryTimeTakenInSeconds = Math.floor((Date.now() - startedAt) / 1000);
-    const terminalSkips = restored.skipped.filter(item => item.entry && !item.partiallyChanged && isOverdueRecoveryEntry(item.entry));
-    await retainExpiredRecovery(terminalSkips.map(item => item.entry), session.sessionId);
-    const retriableSkips = restored.skipped.filter(item => !terminalSkips.includes(item));
-    if (retriableSkips.length) {
-      const error = new Error(retriableSkips.flatMap(item => item.reasons).join('; '));
+    if (restored.skipped.length) {
+      const error = new Error(restored.skipped.flatMap(item => item.reasons).join('; '));
       error.restored = Array.from(restored).concat(restored.partial || []);
       throw error;
     }
@@ -703,7 +665,6 @@ var gsSession = (function() {
     for (const entry of browserEntries.slice().sort((a, b) => a.index - b.index)) {
       let tab;
       try {
-        if (isOverdueRecoveryEntry(entry)) throw new Error('Saved temporary tab is overdue; restore it intentionally from Archive instead.');
         if (windowId == null) {
           const bounds = entry.windowBounds || {};
           const details = { url: entry.originalUrl, type: 'normal', focused: false };
@@ -875,29 +836,15 @@ var gsSession = (function() {
     }
     if (!existingWindow && !restoreOptions.recovery) {
       const identities = new Map(entries.filter(entry => entry.uid).map(entry => [entry.uid, crypto.randomUUID()]));
-      const groups = new Map();
       const groupKeys = new Map();
       for (const entry of entries) {
         entry.uid = identities.get(entry.uid) || crypto.randomUUID();
         entry.meta.uid = entry.uid;
         entry.windowWitnessUids = [];
-        if (Array.isArray(entry.temporaryGroups)) {
-          entry.temporaryGroups = entry.temporaryGroups.map(descriptor => {
-            if (!groups.has(descriptor.id)) groups.set(descriptor.id, crypto.randomUUID());
-            return {
-              ...descriptor, id: groups.get(descriptor.id),
-              memberUids: descriptor.memberUids.filter(uid => identities.has(uid)).map(uid => identities.get(uid)),
-              exemptUids: (descriptor.exemptUids || []).filter(uid => identities.has(uid)).map(uid => identities.get(uid)),
-            };
-          });
-        }
         if (entry.group) {
           const key = entry.group.key || entry.group.sourceId || entry.group.id || entry.group.title + ':' + entry.group.color;
           if (!groupKeys.has(key)) groupKeys.set(key, crypto.randomUUID());
           entry.group.key = groupKeys.get(key);
-        }
-        if (entry.group && entry.group.temporaryId) {
-          entry.group.temporaryId = groups.get(entry.group.temporaryId) || null;
         }
       }
     } else if (existingWindow) {

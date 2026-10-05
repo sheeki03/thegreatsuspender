@@ -7,8 +7,8 @@
       'gsUtils.js', 'gsChrome.js', 'gsStorage.js', 'db.js', 'gsIndexedDb.js', 'gsMessages.js',
       'gsSession.js', 'gsTabQueue.js', 'gsTabCheckManager.js', 'gsFavicon.js', 'gsCleanScreencaps.js',
       'gsTabSuspendManager.js', 'gsTabDiscardManager.js', 'gsSuspendedTab.js',
-      'gsWorkbench.js', 'gsWorkbenchActions.js', 'gsWorkbenchWorkspaces.js', 'gsWorkbenchInsights.js',
-      'gsWorkbenchMemory.js', 'gsLegacyRpc.js', 'background.js',
+      'gsWorkbench.js', 'gsWorkbenchActions.js', 'gsWorkbenchWorkspaces.js', 'gsWorkbenchSnapshots.js',
+      'gsLegacyRpc.js', 'background.js',
     ];
     for (const file of files) {
       await new Promise((resolve, reject) => {

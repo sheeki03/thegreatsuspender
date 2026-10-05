@@ -6,6 +6,9 @@ var gsWorkbenchActions = (function() {
   const ACTIONS = ['suspend', 'restore', 'archive', 'close'];
   const UNDO_SUMMARY = 'Undo restores tab URLs, tab order, groups, pins and suspension state. It cannot recover unsaved page data or application JavaScript state.';
   const DRAFT_VERIFICATION_TIMEOUT_MS = 3000;
+  // Restores are paced so a large batch doesn't load every page at once.
+  const RESTORE_CONCURRENCY = 3;
+  const RESTORE_DELAY_MS = 300;
   let initialised = false;
   let operationTail = Promise.resolve();
   let restoreTimer = null;
@@ -120,7 +123,6 @@ var gsWorkbenchActions = (function() {
       meta,
       window: await api(gsBrowser.windows, 'get', tab.windowId),
       snooze: meta.snooze || null,
-      protection: meta.protection || null,
     };
     if (tab.groupId >= 0) {
       const group = await api(gsBrowser.tabGroups, 'get', tab.groupId);
@@ -136,7 +138,6 @@ var gsWorkbenchActions = (function() {
     }
     const windowTabs = await api(gsBrowser.tabs, 'query', { windowId: tab.windowId });
     row.windowWitnessUids = windowTabs.map(member => (gsWorkbench.getMeta(member.id) || {}).uid).filter(Boolean);
-    row.expiresAt = gsWorkbenchWorkspaces.getTemporaryInfo(row).expiresAt;
     return row;
   }
 
@@ -271,20 +272,25 @@ var gsWorkbenchActions = (function() {
     return Promise.race([pending, timeout]).finally(() => clearTimeout(timer));
   }
 
-  async function lease(row) {
+  // Freezes the page's editors for the instant of the action when the page can
+  // grant a lease. Only typing the page reported blocks; a page that can't
+  // answer has no detected draft and proceeds without a lease.
+  async function lease(row, options) {
     if (row.asleep) return null;
+    const ignoreDrafts = !!(options && options.ignoreDrafts);
     let response;
     try {
-      response = await draftMessage(row, { action: 'prepareTabAction' });
+      response = await draftMessage(row, { action: 'prepareTabAction', allowDirtyForPolicy: ignoreDrafts });
     } catch (error) {
-      throw noAction('Draft state unverified: ' + error.message);
+      return null;
     }
-    if (!response || typeof response.dirty !== 'boolean' || typeof response.draftUnverified !== 'boolean' ||
-        response.dirty || response.draftUnverified || !response.draftLease ||
-        response.documentUrl !== row.originalUrl || response.draftLease.expiresAt <= Date.now()) {
-      throw noAction(response && response.dirty ? 'Unsaved draft detected at execution' : 'Draft state unverified at execution');
+    if (!response) return null;
+    if (response.dirty && !ignoreDrafts) throw noAction('Unsaved form or editable content');
+    if (response.documentUrl && response.documentUrl !== row.originalUrl) {
+      if (response.draftLease) release(row, response.draftLease);
+      throw noAction('Page changed at execution; its new page was not changed');
     }
-    return response.draftLease;
+    return response.draftLease && response.draftLease.expiresAt > Date.now() ? response.draftLease : null;
   }
 
   async function release(row, token) {
@@ -304,6 +310,8 @@ var gsWorkbenchActions = (function() {
         gsTabSuspendManager.queueTabForSuspensionAsPromise(row, 1, {
           workbench: true,
           allowActive: !!options.allowActive,
+          ignoreDrafts: !!options.ignoreDrafts,
+          explicit: !!options.explicit,
           expectedOriginalUrl: row.originalUrl,
           preserveExactUrl: true,
           discardInPlace: options.targetStatus === 'suspended' ? false : undefined,
@@ -352,7 +360,6 @@ var gsWorkbenchActions = (function() {
       if (!meta || meta.uid !== current.uid || originalUrl(latest) !== current.originalUrl || !isAsleep(latest)) {
         throw noAction('Queued restore no longer targets the selected sleeping page; the current page was not replaced');
       }
-      gsWorkbench.intent(current.id, 'restore', options.reason || 'bulk-restore');
       if (gsUtils.isSuspendedTab(latest)) {
         // Preserve the legacy scroll/history/autoDiscardable restore path.
         tgs.unsuspendTab(latest);
@@ -364,8 +371,7 @@ var gsWorkbenchActions = (function() {
 
   function admitRestore(trigger) {
     const admission = restoreAdmission.then(async () => {
-      const delay = Math.max(0, Number(gsWorkbench.getState().settings.restoreDelayMs) || 0);
-      const remaining = lastNavigationStartedAt + delay - Date.now();
+      const remaining = lastNavigationStartedAt + RESTORE_DELAY_MS - Date.now();
       if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
       const result = await trigger();
       lastNavigationStartedAt = Date.now();
@@ -393,10 +399,7 @@ var gsWorkbenchActions = (function() {
   function pumpRestores() {
     clearTimeout(restoreTimer);
     restoreTimer = null;
-    const settings = gsWorkbench.getState().settings;
-    const concurrency = Math.max(1, Math.floor(Number(settings.restoreConcurrency) || 1));
-    const delay = Math.max(0, Number(settings.restoreDelayMs) || 0);
-    if (!restoreJobs.length || activeRestores >= concurrency) return;
+    if (!restoreJobs.length || activeRestores >= RESTORE_CONCURRENCY) return;
     const waitMs = nextRestoreAt - Date.now();
     if (waitMs > 0) {
       restoreTimer = setTimeout(pumpRestores, waitMs);
@@ -405,7 +408,7 @@ var gsWorkbenchActions = (function() {
     restoreJobs.sort((a, b) => a.priority - b.priority || a.sequence - b.sequence);
     const job = restoreJobs.shift();
     activeRestores += 1;
-    nextRestoreAt = Date.now() + delay;
+    nextRestoreAt = Date.now() + RESTORE_DELAY_MS;
     Promise.resolve().then(job.handler).then(job.resolve, job.reject).finally(() => {
       activeRestores -= 1;
       pumpRestores();
@@ -495,16 +498,6 @@ var gsWorkbenchActions = (function() {
     return false;
   }
 
-  async function recordProtection(row, action, reasons, context) {
-    if (!reasons.length || reasons.every(reason =>
-        ['already-awake', 'already-asleep', 'tab-unavailable-or-excluded'].includes(reason))) return;
-    try {
-      await gsWorkbench.record('protected', row, reasons.join(', '), { action, reasons });
-    } catch (error) {
-      context.warnings.push('Protection metrics could not be saved: ' + error.message);
-    }
-  }
-
   async function performNow(action, ids, options) {
     const plan = await preview(action, ids, options);
     const context = operation(action, options);
@@ -512,12 +505,10 @@ var gsWorkbenchActions = (function() {
     const candidates = plan.eligible;
     const focus = action === 'restore' && candidates.length ?
       await api(gsBrowser.windows, 'getLastFocused', { windowTypes: ['normal'] }) : null;
-    for (const item of plan.skipped) await recordProtection(item, action, item.reasons, context);
     const run = async reference => {
       const checked = await inspect(action, reference, options);
       if (checked.reasons.length) {
         skipped.push({ ...checked.row, reasons: checked.reasons });
-        await recordProtection(checked.row, action, checked.reasons, context);
         return;
       }
       const row = checked.row;
@@ -557,10 +548,10 @@ var gsWorkbenchActions = (function() {
           if (guardReasons.length) throw new Error(guardReasons.join(', '));
         }
         if (action === 'close' || action === 'archive') {
-          token = await lease(finalRow);
+          token = await lease(finalRow, options);
           const raw = await api(gsBrowser.tabs, 'get', row.id);
           const latest = { ...finalRow, ...raw, originalUrl: originalUrl(raw), status: status(raw), asleep: isAsleep(raw) };
-          if (!token && !latest.asleep) {
+          if (finalRow.asleep && !latest.asleep) {
             throw noAction('Sleeping tab woke before execution; preview its current page before closing');
           }
           if ((gsWorkbench.getMeta(row.id) || {}).uid !== row.uid || latest.originalUrl !== row.originalUrl) {
@@ -574,11 +565,14 @@ var gsWorkbenchActions = (function() {
           const reasons = gsWorkbench.getProtectionReasonsSync(latest, action, options);
           if (reasons.length) throw new Error(reasons.join(', '));
           if (token && token.expiresAt <= Date.now()) throw new Error('Draft safety lease expired; retry this action');
-          gsWorkbench.intent(row.id, action, options.reason || 'bulk-' + action);
           await api(gsBrowser.tabs, 'remove', row.id);
           await updateUndo(context, key, { status: 'changed', afterTabId: null });
         } else if (action === 'suspend') {
           await suspend(finalRow, options);
+          // Choosing to suspend a kept-awake tab ends its keep-awake period.
+          if (options.explicit && (gsWorkbench.getMeta(row.id) || {}).snooze) {
+            await gsWorkbench.update(state => { if (state.meta[row.id]) state.meta[row.id].snooze = null; });
+          }
           const after = await readRow(row.id, row);
           await updateUndo(context, key, { status: 'changed', afterTabId: row.id, after: snapshot(after) });
         } else {
@@ -587,10 +581,6 @@ var gsWorkbenchActions = (function() {
           await updateUndo(context, key, { status: 'changed', afterTabId: row.id, after: snapshot(after) });
         }
         if (!context.changed.includes(row.id)) context.changed.push(row.id);
-        if (action === 'archive') {
-          try { await gsWorkbench.record('archived', row, options.reason || 'bulk-archive', { archiveId: context.id }); }
-          catch (error) { context.warnings.push('Archive metric could not be saved: ' + error.message); }
-        }
       } catch (error) {
         const changed = error.noAction ? false : await observeChanged(context, key, row, before);
         if (changed === false) {
@@ -605,7 +595,6 @@ var gsWorkbenchActions = (function() {
         }
         const reasons = error.reasons || [error.message];
         skipped.push({ ...row, reasons, partiallyChanged: changed === true, outcomeUnverified: changed === null });
-        await recordProtection(row, action, reasons, context);
       } finally {
         await release(row, token);
       }
@@ -728,11 +717,6 @@ var gsWorkbenchActions = (function() {
       const sourceUid = entry.uid;
       const url = entryUrl(entry);
       const unique = entryKey(entry, item.index);
-      const expiry = gsWorkbenchWorkspaces.getSavedTemporaryInfo(entry).expiresAt;
-      if (expiry && expiry <= Date.now() && !['archive-restore', 'bulk-undo'].includes(options.reason)) {
-        result.skipped.push({ entry, restoreEntryIndex: item.index, reasons: ['Saved temporary tab is overdue; restore it intentionally from Archive instead.'] });
-        return Promise.resolve();
-      }
       if (typeof url !== 'string' || !url || !/^(https?|file):\/\//i.test(url)) {
         result.skipped.push({ entry, restoreEntryIndex: item.index, reasons: ['Saved URL is not a restorable normal browser page.'] });
         return Promise.resolve();
@@ -807,7 +791,6 @@ var gsWorkbenchActions = (function() {
                     (gsWorkbench.getMeta(tab.id) || {}).uid !== entry.uid) {
                   throw noAction('New restore tab was used before navigation; its current page was not replaced');
                 }
-                gsWorkbench.intent(tab.id, targetStatus === 'suspended' ? 'suspend' : 'restore', options.reason || 'saved-tab-restore');
                 return api(gsBrowser.tabs, 'update', tab.id, { url: targetUrl, pinned: !!entry.pinned, active: false });
               }));
             row = await readRow(tab.id, { ...entry, id: tab.id, windowId: mapping.id, originalUrl: url });
@@ -850,7 +833,6 @@ var gsWorkbenchActions = (function() {
                     }
                     discardReasons = gsWorkbench.getProtectionReasonsSync(finalRow, 'suspend', { allowActive: true });
                     if (discardReasons.length || token && token.expiresAt <= Date.now()) return false;
-                    gsWorkbench.intent(current.id, 'suspend', options.reason || 'snapshot-restore');
                     return true;
                   },
                 });
@@ -964,7 +946,7 @@ var gsWorkbenchActions = (function() {
           if (orderedMembers.some(id => !Number.isInteger(id))) throw new Error('Native group membership changed during restore.');
           if (members[0].index !== unit.index || members.some((member, index) => member.id !== orderedMembers[index])) {
             // Leave one member grouped at all times, keeping the native ID and
-            // its temporary-group policy alive while the other members reorder.
+            // its organization intact while the other members reorder.
             const anchor = orderedMembers[0];
             const others = orderedMembers.slice(1);
             if (others.length) await api(gsBrowser.tabs, 'ungroup', others);
@@ -999,18 +981,6 @@ var gsWorkbenchActions = (function() {
       } catch (error) {
         items.forEach(item => organizationFailures.set(item, 'Group collapse restore failed: ' + error.message));
       }
-    }
-    try {
-      const actualRows = await gsWorkbench.getTabs();
-      const rebindEntries = completed.map(item => ({ ...item.entry, sourceUid: item.sourceUid }));
-      for (const row of result.partial) {
-        const entry = indexed.find(item => item.index === row.restoreEntryIndex);
-        if (entry) rebindEntries.push(entry.entry);
-      }
-      await gsWorkbenchWorkspaces.rebindTemporaryGroups(rebindEntries, actualRows,
-        { exemptExpired: ['archive-restore', 'bulk-undo'].includes(options.reason) });
-    } catch (error) {
-      completed.forEach(item => organizationFailures.set(item, 'Temporary expiry could not be restored: ' + error.message));
     }
     const completedByWindow = new Map();
     for (const item of completed) {
@@ -1230,13 +1200,6 @@ var gsWorkbenchActions = (function() {
           }
         }
       }
-    }
-    try {
-      await gsWorkbench.record('undo', null, 'bulk-undo', {
-        operationId: undo.id, changed: Array.from(new Set(changed)), failed: skipped.length,
-      });
-    } catch (error) {
-      warnings.push('Undo activity could not be saved: ' + error.message);
     }
     const remaining = gsWorkbench.getState().undo;
     return {

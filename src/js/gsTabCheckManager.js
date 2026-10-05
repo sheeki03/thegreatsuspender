@@ -271,8 +271,7 @@ var gsTabCheckManager = (function() {
       const url = tab.url || tab.pendingUrl;
       const originalUrl = gsUtils.getOriginalUrl(url);
       if (originalUrl && originalUrl.indexOf('file') === 0) {
-        if (gsSession.isInitialising() && gsWorkbench.isReady() &&
-            gsWorkbench.getState().settings.startupPolicy !== 'current') {
+        if (gsSession.isInitialising() && gsWorkbench.isReady()) {
           resolve(gsUtils.STATUS_SUSPENDED);
           return;
         }

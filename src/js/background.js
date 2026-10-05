@@ -1076,8 +1076,8 @@ var tgs = (function() {
       //safety check to ensure suspended tab has been initialised
       gsTabCheckManager.queueTabCheck(focusedTab, { refetchTab: false }, 0);
     }
-    if (gsSession.isInitialising() && gsWorkbench.isReady() &&
-        gsWorkbench.getState().settings.startupPolicy !== 'current') return;
+    // Leave tabs asleep while the browser is still starting up.
+    if (gsSession.isInitialising() && gsWorkbench.isReady()) return;
 
     //check for auto-unsuspend
     var autoUnsuspend = gsStorage.getOption(gsStorage.UNSUSPEND_ON_FOCUS);
