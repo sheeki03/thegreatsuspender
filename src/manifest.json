@@ -11,10 +11,7 @@
     "contextMenus",
     "cookies",
     "alarms",
-    "idle",
     "tabGroups",
-    "bookmarks",
-    "nativeMessaging",
     "offscreen",
     "scripting",
     "favicon",
@@ -90,7 +87,7 @@
       "description": "__MSG_ext_cmd_unsuspend_all_windows_description__"
     },
     "7-open-dashboard": {
-      "description": "Open the searchable tab dashboard"
+      "description": "Open the list of all tabs"
     }
   }
 }

@@ -4,7 +4,6 @@ var gsBrowser = (() => {
   const nativeRuntime = chrome.runtime;
   const listeners = new Map();
   let callbackError = null;
-  const nativePorts = new Map();
   let manifest;
   let engineReady = false;
   let engineError = null;
@@ -43,55 +42,11 @@ var gsBrowser = (() => {
   function namespace(path) {
     return path.split('.').reduce((owner, name) => owner[name] || (owner[name] = {}), api);
   }
-  function finishNativePort(id, error) {
-    const state = nativePorts.get(id);
-    if (!state) return;
-    state.closed = true;
-    nativePorts.delete(id);
-    const previousError = callbackError;
-    callbackError = error ? { message: error } : null;
-    try {
-      for (const handler of Array.from(listeners.get('nativePort.' + id + '.onDisconnect') || [])) handler(state.port);
-    } finally {
-      callbackError = previousError;
-      listeners.delete('nativePort.' + id + '.onMessage');
-      listeners.delete('nativePort.' + id + '.onDisconnect');
-    }
-  }
-  function connectNative(hostName) {
-    const id = crypto.randomUUID();
-    const state = { closed: false, port: null, connected: null };
-    const port = {
-      name: hostName,
-      onMessage: event('nativePort.' + id + '.onMessage'),
-      onDisconnect: event('nativePort.' + id + '.onDisconnect'),
-      postMessage(message) {
-        if (state.closed) throw new Error('The native connection is closed.');
-        state.connected.then(() => {
-          if (!state.closed) return request('nativePost', { portId: id, message });
-        }).catch(error => finishNativePort(id, error.message));
-      },
-      disconnect() {
-        if (state.closed) return;
-        state.closed = true;
-        nativePorts.delete(id);
-        listeners.delete('nativePort.' + id + '.onMessage');
-        listeners.delete('nativePort.' + id + '.onDisconnect');
-        state.connected.then(() => request('nativeDisconnect', { portId: id })).catch(() => {});
-      },
-    };
-    state.port = port;
-    nativePorts.set(id, state);
-    state.connected = request('nativeConnect', { portId: id, hostName });
-    state.connected.catch(error => finishNativePort(id, error.message));
-    return port;
-  }
   api.runtime = {
     id: nativeRuntime.id,
     getURL: path => nativeRuntime.getURL(path),
     getManifest: () => manifest,
     sendMessage: (...args) => nativeRuntime.sendMessage(...args),
-    connectNative,
     onMessage: event('runtime.onMessage'), onStartup: event('runtime.onStartup'),
     onInstalled: event('runtime.onInstalled'), onUpdateAvailable: event('runtime.onUpdateAvailable'),
   };
@@ -104,14 +59,6 @@ var gsBrowser = (() => {
   };
   nativeRuntime.onMessage.addListener((message, sender, respond) => {
     if (!message || sender.id !== nativeRuntime.id) return false;
-    if (message.action === 'nativePortEvent') {
-      if (message.event === 'disconnect') finishNativePort(message.portId, message.error);
-      else if (message.event === 'message' && nativePorts.has(message.portId)) {
-        for (const handler of Array.from(listeners.get('nativePort.' + message.portId + '.onMessage') || [])) handler(message.message);
-      }
-      respond({ ok: true });
-      return false;
-    }
     if (message.action === 'engineControl' && message.command === 'ready') {
       initialized.then(() => respond(engineReady ? { ok: true } : { ok: false, error: engineError }));
       return true;

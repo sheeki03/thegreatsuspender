@@ -11,9 +11,7 @@ const methods = {
   'storage.sync': ['get', 'set', 'remove', 'clear', 'getBytesInUse'],
   'storage.managed': ['get', 'getBytesInUse'],
   tabGroups: ['get', 'query', 'update', 'move'],
-  bookmarks: ['get', 'getChildren', 'getRecent', 'getTree', 'getSubTree', 'search', 'create', 'move', 'update', 'remove', 'removeTree'],
   alarms: ['create', 'get', 'getAll', 'clear', 'clearAll'],
-  idle: ['queryState', 'setDetectionInterval'],
   contextMenus: ['create', 'update', 'remove', 'removeAll'],
   action: ['setIcon', 'setTitle', 'getTitle', 'setBadgeText', 'getBadgeText', 'setBadgeBackgroundColor', 'enable', 'disable'],
   cookies: ['get', 'getAll', 'set', 'remove', 'getAllCookieStores'],
@@ -29,7 +27,7 @@ const events = [
   'tabs.onMoved', 'tabs.onAttached', 'tabs.onDetached', 'tabs.onReplaced',
   'windows.onCreated', 'windows.onRemoved', 'windows.onFocusChanged', 'windows.onBoundsChanged',
   'tabGroups.onCreated', 'tabGroups.onUpdated', 'tabGroups.onRemoved', 'tabGroups.onMoved',
-  'idle.onStateChanged', 'alarms.onAlarm', 'commands.onCommand', 'contextMenus.onClicked',
+  'alarms.onAlarm', 'commands.onCommand', 'contextMenus.onClicked',
   'storage.onChanged', 'permissions.onAdded', 'permissions.onRemoved', 'cookies.onChanged',
   'runtime.onStartup', 'runtime.onInstalled', 'runtime.onUpdateAvailable',
 ];
@@ -37,7 +35,6 @@ let creating = null;
 let capabilities = null;
 const tabScopes = new Map();
 const windowScopes = new Map();
-const nativePorts = new Map();
 
 function ownerAt(path) {
   return path.split('.').reduce((owner, part) => owner && owner[part], chrome);
@@ -91,7 +88,7 @@ async function invoke(path, args) {
   if (!owner || typeof owner[method] !== 'function') return Promise.reject(new Error('Browser operation is unavailable: ' + path));
   await guardOperation(path, args);
   // These APIs have no callback form; the remaining exposed methods support it.
-  if (path === 'alarms.create' || path === 'idle.setDetectionInterval' || path === 'runtime.reload') return Promise.resolve(owner[method](...args));
+  if (path === 'alarms.create' || path === 'runtime.reload') return Promise.resolve(owner[method](...args));
   return new Promise((resolve, reject) => {
     let immediate;
     try {
@@ -220,60 +217,19 @@ async function scopedEvent(name, args) {
 function respondTo(promise, respond) {
   promise.then(data => respond({ ok: true, data }), error => respond({ ok: false, error: error.message || String(error) }));
 }
-async function nativePortEvent(id, event, values, contextId) {
-  const context = await engineContext();
-  if (!context || context.contextId !== contextId) {
-    const connection = nativePorts.get(id);
-    nativePorts.delete(id);
-    if (connection) connection.port.disconnect();
-    return;
-  }
-  await chrome.runtime.sendMessage({ action: 'nativePortEvent', portId: id, event, ...values });
-}
-function connectNative(request, context) {
-  if (isPrivate || request.hostName !== 'com.sheeki.tab_memory') throw new Error('Only the normal-profile memory helper is supported.');
-  if (typeof request.portId !== 'string' || !/^[a-f0-9-]{36}$/i.test(request.portId) || nativePorts.has(request.portId)) throw new Error('Invalid native connection ID.');
-  const id = request.portId;
-  const port = chrome.runtime.connectNative(request.hostName);
-  nativePorts.set(id, { port, contextId: context.contextId });
-  port.onMessage.addListener(message => {
-    nativePortEvent(id, 'message', { message }, context.contextId).catch(error => console.error('Native memory reply:', error));
-  });
-  port.onDisconnect.addListener(() => {
-    const error = chrome.runtime.lastError && chrome.runtime.lastError.message;
-    nativePorts.delete(id);
-    nativePortEvent(id, 'disconnect', { error }, context.contextId).catch(error => console.error('Native memory disconnect:', error));
-  });
-  return id;
-}
-function operateNativePort(request, context) {
-  const connection = nativePorts.get(request.portId);
-  if (!connection && request.command === 'nativeDisconnect') return;
-  if (!connection || connection.contextId !== context.contextId) throw new Error('The native connection is no longer current.');
-  if (request.command === 'nativeDisconnect') {
-    nativePorts.delete(request.portId);
-    connection.port.disconnect();
-    return;
-  }
-  const message = request.message;
-  if (!message || Array.isArray(message) || Object.keys(message).length !== 1 || message.action !== 'memory') throw new Error('The memory helper accepts only a pressure reading request.');
-  connection.port.postMessage(message);
-}
 chrome.runtime.onMessage.addListener((request, sender, respond) => {
   if (!request || sender.id !== chrome.runtime.id) return false;
   if (request.action === 'browserBroker') {
     respondTo((async () => {
-      const context = await authenticateEngine(sender);
+      await authenticateEngine(sender);
       if (request.command === 'initialize') return getCapabilities();
       if (request.command === 'invoke') return scopedResult(request.method, await invoke(request.method, request.args || []));
       if (request.command === 'scriptJob') return runScriptJob(request.details);
-      if (request.command === 'nativeConnect') return connectNative(request, context);
-      if (request.command === 'nativePost' || request.command === 'nativeDisconnect') return operateNativePort(request, context);
       throw new Error('Unknown browser broker command.');
     })(), respond);
     return true;
   }
-  if (request.action === 'engineControl' || request.action === 'engineEvent' || request.action === 'nativePortEvent' || request.action === 'workbenchChanged') return false;
+  if (request.action === 'engineControl' || request.action === 'engineEvent' || request.action === 'workbenchChanged') return false;
   if (sender.tab && !!sender.tab.incognito !== isPrivate) return false;
   respondTo((async () => {
     await ensureEngine();
