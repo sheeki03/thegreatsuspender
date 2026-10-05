@@ -1,822 +1,818 @@
-/* global chrome, workbenchClient */
+/* global workbenchClient */
 (function() {
   'use strict';
-  var C = workbenchClient, n = C.node, b = C.button;
+  var C = workbenchClient, n = C.node;
+  var VIEWS = {
+    tabs: ['Tabs', 'Click a tab to go to it. Select tabs to act on several at once.'],
+    duplicates: ['Duplicates', 'Pages that are open more than once. Keep one copy and close the rest.'],
+    workspaces: ['Workspaces', 'Named sets of tabs you can put to sleep and wake together.'],
+    snapshots: ['Snapshots', 'Saved lists of your open tabs, so you can bring them back after a crash or a clean-up.'],
+    archive: ['Archive', 'Tabs you archived. They are closed, but you can bring them back any time.']
+  };
+  var COLORS = ['blue', 'green', 'orange', 'purple', 'red', 'cyan', 'pink', 'yellow', 'grey'];
+  var TIMER_OPTIONS = [['0.33', '20 seconds'], ['1', '1 minute'], ['5', '5 minutes'], ['10', '10 minutes'], ['15', '15 minutes'], ['30', '30 minutes'], ['60', '1 hour'], ['120', '2 hours'], ['240', '4 hours'], ['360', '6 hours'], ['720', '12 hours'], ['1440', '1 day'], ['2880', '2 days'], ['4320', '3 days'], ['10080', '1 week'], ['20160', '2 weeks'], ['0', 'Never']];
+  var UNSAVED = 'Unsaved form or editable content';
+  var IGNORED = ['already-asleep', 'already-awake'];
+  var VERBS = { suspend: 'Suspend', restore: 'Wake', archive: 'Archive', close: 'Close' };
+
   var params = new URL(location.href).searchParams;
   var route = { view: params.get('view') || 'tabs', query: params.get('q') || '', status: params.get('status') || 'all', window: params.get('window') || 'all', workspace: params.get('workspace') || '' };
-  var views = {
-    tabs: ['Tabs', 'Across your browser, without losing your place.'],
-    inbox: ['Inbox', 'New tabs you have not revisited. Keep what matters; safely clear the rest.'],
-    duplicates: ['Duplicates', 'Exact URLs only. Tabs in separate workspaces stay separate.'],
-    temporary: ['Temporary tabs', 'Expiring tabs and groups. Protected tabs stay open, even when overdue.'],
-    workspaces: ['Workspaces', 'Keep a task together, with its own suspension rules.'],
-    archive: ['Archive', 'Locally saved tabs you can restore when you need them.'],
-    snapshots: ['Snapshots', 'Save and compare browser sessions without replacing your open work.'],
-    timeline: ['Timeline', 'A local record of what opened, slept, returned and closed.'],
-    insights: ['Insights', 'Measured browser activity and suspension behavior. No estimated memory savings.'],
-    neglected: ['Neglected tabs', 'A review queue, not an automatic close rule.']
-  };
-  if (!views[route.view]) route.view = 'tabs';
-  var data = null, selected = new Set(), inspectedId = null, rowFocusId = null;
-  var busy = false, loading = false, refreshAgain = false, currentContent = '', inspectorKey = '';
-  var rowsById = new Map(), visibleRows = [], duplicateChoices = new Map();
-  var undoButton = document.getElementById('undo-button');
-  var content = document.getElementById('view-content');
-  var inspector = document.getElementById('inspector');
-  var notice = document.getElementById('page-notice');
-  var search = document.getElementById('tab-search');
-  var statusFilter = document.getElementById('status-filter');
-  var windowFilter = document.getElementById('window-filter');
-  var resultBox = null, previewBox = null, previewTrigger = null;
-  var workspaceEditor = null, bookmarkPanel = null, comparePanel = null, transitionPanel = null;
-  var snapshotSelection = { before: '', after: '' };
-  var timelineLimit = 100, previewVersion = 0;
-  var listHost, listCount, selectAll;
-  var nativeColors = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'];
+  if (!VIEWS[route.view]) route.view = 'tabs';
+  if (!['all', 'awake', 'asleep', 'kept'].includes(route.status)) route.status = 'all';
 
-  function say(text, kind) { C.notice(notice, text, kind); }
-  function failed(error) { say(error.message || String(error), 'error'); }
+  var data = null, busy = false, loading = false, refreshAgain = false;
+  var selected = new Set(), focusId = null, visible = [];
+  var contentKey = '', tabsUi = null, rowNodes = new Map(), headingNodes = new Map();
+  var editing = null, compareState = { before: '', after: '', diff: null }, duplicateChoice = new Map();
+  var force = null;
+  var content = $('view-content');
+
+  function $(id) { return document.getElementById(id); }
+  function plural(count, word, many) { return count + ' ' + (count === 1 ? word : many || word + 's'); }
   function tabTitle(row) { return row.title || row.originalUrl || row.url || 'Untitled tab'; }
-  function workspaceName(id) {
-    var workspace = data && data.workspaces.find(function(item) { return item.id === id; });
-    return workspace ? workspace.name : 'Unassigned';
+  function site(url) {
+    try { var parsed = new URL(url); return parsed.protocol === 'file:' ? 'Local file' : parsed.hostname.replace(/^www\./, '') || url; }
+    catch (error) { return url || ''; }
   }
-  function activeRows() {
-    if (!data) return [];
-    if (selected.size) return data.tabs.filter(function(row) { return selected.has(row.id); });
-    return data.tabs.filter(function(row) { return row.id === inspectedId; });
+  function workspaceById(id) { return data && data.workspaces.find(function(item) { return item.id === id; }) || null; }
+  function colorClass(color) { return 'color-' + (COLORS.includes(color) ? color : 'blue'); }
+  function dot(color) { return n('span', { class: 'dot ' + colorClass(color), 'aria-hidden': 'true' }); }
+  function button(label, handler, attributes, icon) {
+    var element = C.button(label, handler, attributes);
+    if (icon) element.prepend(C.icon(icon));
+    return element;
   }
-  function idsForAction() { return activeRows().map(function(row) { return row.id; }); }
-  function empty(title, text) { return n('div', { class: 'empty-state' }, [n('img', { class: 'empty-mascot', src: 'img/suspendy-guy.png', alt: '', width: '48', height: '71' }), n('h2', { text: title }), n('p', { text: text })]); }
+  function empty(title, text, action) {
+    return n('div', { class: 'empty-state' }, [n('img', { src: 'img/suspendy-guy.png', alt: '' }), n('h2', { text: title }), n('p', { text: text }), action || null]);
+  }
+  function until(value) {
+    if (!value) return '';
+    if (value.session) return 'until the browser restarts';
+    if (!value.until) return 'until you turn it off';
+    var date = new Date(value.until), today = new Date();
+    var time = date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    return 'until ' + (date.toDateString() === today.toDateString() ? time : date.toLocaleDateString(undefined, { weekday: 'short' }) + ' ' + time);
+  }
+  function when(value) { return value ? new Date(value).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : ''; }
+  function timerLabel(minutes) {
+    var match = TIMER_OPTIONS.find(function(option) { return Number(option[0]) === Number(minutes); });
+    return match ? match[1].toLowerCase() : minutes + ' minutes';
+  }
+  function keptReasons(row) {
+    return (row.protectionReasons || []).filter(function(reason) { return reason !== 'Active tab'; });
+  }
+  function isKept(row) { return !row.asleep && (!!row.snooze || keptReasons(row).length > 0); }
+  function windowLabels() {
+    var labels = new Map();
+    data.tabs.forEach(function(row) { if (!labels.has(row.windowId)) labels.set(row.windowId, 'Window ' + (Number(row.windowOrdinal) + 1)); });
+    return labels;
+  }
   function saveRoute() {
     var url = new URL(location.href);
+    url.search = '';
     url.searchParams.set('view', route.view);
-    [['q', route.query], ['status', route.status === 'all' ? '' : route.status], ['window', route.window === 'all' ? '' : route.window], ['workspace', route.workspace]].forEach(function(pair) {
-      if (pair[1]) url.searchParams.set(pair[0], pair[1]); else url.searchParams.delete(pair[0]);
-    });
+    if (route.query) url.searchParams.set('q', route.query);
+    if (route.status !== 'all') url.searchParams.set('status', route.status);
+    if (route.window !== 'all') url.searchParams.set('window', route.window);
+    if (route.workspace) url.searchParams.set('workspace', route.workspace);
     history.replaceState(null, '', url.href);
   }
   function navigate(view, workspace) {
     route.view = view;
     route.workspace = workspace || '';
-    currentContent = '';
-    inspectorKey = '';
+    if (view !== 'tabs') selected.clear();
+    editing = null;
     saveRoute();
     render();
+    $('view-title').focus({ preventScroll: true });
+    window.scrollTo(0, 0);
   }
-  function restoreTrigger(trigger) {
-    var key = trigger && trigger.dataset.focusKey;
-    var current = trigger && trigger.isConnected ? trigger :
-      key ? Array.from(document.querySelectorAll('[data-focus-key]')).find(function(element) { return element.dataset.focusKey === key; }) : null;
-    if (current && current.closest('[hidden]')) current = null;
-    if (!current) current = document.querySelector('.row-title[tabindex="0"]') || document.getElementById('refresh-button');
-    if (current) { current.disabled = false; current.focus(); }
+
+  /* Result of the last action, with Undo and "do it anyway" when typing blocked it. */
+  function showResult(text, options) {
+    options = options || {};
+    var bar = $('result');
+    bar.hidden = false;
+    bar.classList.toggle('is-error', !!options.error);
+    $('result-text').textContent = text;
+    $('result-undo').hidden = !options.undo;
+    force = options.force && options.force.ids.length ? options.force : null;
+    $('result-force').hidden = !force;
+    if (force) $('result-force').textContent = VERBS[force.action] + ' anyway';
+    var skipped = options.skipped || [];
+    $('result-details').hidden = !skipped.length;
+    $('result-details').open = false;
+    $('result-summary').textContent = skipped.length === 1 ? 'See why' : 'See why (' + skipped.length + ')';
+    $('result-reasons').replaceChildren.apply($('result-reasons'), skipped.map(function(row) {
+      var saved = row.entry || {};
+      return n('li', {}, [n('strong', { text: row.title || saved.title || row.originalUrl || saved.originalUrl || 'Tab' }), n('span', { text: (row.reasons || [row.reason || 'Unavailable']).map(C.reasonText).join(', ') })]);
+    }));
   }
-  function closeInlinePanel(panel) {
-    if (!panel) return;
-    if (panel === workspaceEditor) workspaceEditor = null;
-    else if (panel === bookmarkPanel) bookmarkPanel = null;
-    else if (panel === transitionPanel) transitionPanel = null;
-    else if (panel === comparePanel) comparePanel = null;
-    else return;
-    if (route.view === 'workspaces') renderWorkspaces();
-    else if (route.view === 'snapshots') renderSnapshots();
-    restoreTrigger(panel._trigger);
+  function errorResult(error) { showResult(error && error.message || String(error), { error: true }); }
+  function describe(action, result, ids, chosen) {
+    var detail = C.collectResults(result);
+    var skipped = detail.skipped.filter(function(row) { return !(row.reasons || [row.reason]).every(function(reason) { return IGNORED.includes(reason); }); });
+    var unsaved = skipped.filter(function(row) { return (row.reasons || []).includes(UNSAVED); });
+    var changed = detail.changed.length;
+    var done = { suspend: 'Suspended', restore: 'Woke', archive: 'Archived', close: 'Closed' }[action];
+    var force = unsaved.length && action !== 'restore' ? { action: action, ids: unsaved.map(function(row) { return row.id; }) } : null;
+    var single = ids && ids.length === 1 && (chosen || data && data.tabs.find(function(row) { return row.id === ids[0]; }));
+    if (single) {
+      var name = '“' + tabTitle(single) + '”';
+      if (unsaved.length) return { text: name + ' has typing that may not be saved, so it was left open.', skipped: [], changed: changed, force: force };
+      if (skipped.length) return { text: name + ' was left as it was: ' + (skipped[0].reasons || [skipped[0].reason]).map(C.reasonText).join(', ').toLowerCase() + '.', skipped: [], changed: changed, force: null };
+      if (changed) return { text: done + ' ' + name + '.', skipped: [], changed: changed, force: null };
+    }
+    var text = changed ? done + ' ' + plural(changed, 'tab') + '.' : 'Nothing changed.';
+    if (skipped.length) text += ' ' + plural(skipped.length, 'tab') + ' ' + (action === 'restore' ? 'stayed asleep' : action === 'suspend' ? 'stayed awake' : 'stayed open') + '.';
+    if (unsaved.length) text += ' ' + (unsaved.length === 1 ? 'One has' : unsaved.length + ' have') + ' unsaved typing.';
+    if (detail.errors.length) text += ' ' + plural(detail.errors.length, 'error') + '.';
+    return { text: text, skipped: skipped, changed: changed, force: force };
   }
-  function preserveFocus(handler) {
-    var active = document.activeElement;
-    var key = active && active.dataset.focusKey;
-    var start = active && active.selectionStart;
-    var end = active && active.selectionEnd;
-    var value = active && active.value;
-    var checked = active && active.checked;
-    var expanded = new Set(Array.from(document.querySelectorAll('details[open] > summary[data-focus-key]')).map(function(summary) { return summary.dataset.focusKey; }));
-    handler();
-    assignFocusKeys();
-    Array.from(document.querySelectorAll('details > summary[data-focus-key]')).forEach(function(summary) { if (expanded.has(summary.dataset.focusKey)) summary.parentElement.open = true; });
-    if (active && document.activeElement !== active) {
-      var next = active.isConnected ? active : key ? Array.from(document.querySelectorAll('[data-focus-key]')).find(function(element) { return element.dataset.focusKey === key; }) : null;
-      if (next) {
-        if (next !== active && /^(INPUT|TEXTAREA|SELECT)$/.test(next.tagName)) {
-          if (next.tagName !== 'SELECT' || Array.from(next.options).some(function(option) { return option.value === value; })) next.value = value;
-          if (next.type === 'checkbox' || next.type === 'radio') next.checked = checked;
-        }
-        next.focus({ preventScroll: true });
-        if (typeof start === 'number' && next.setSelectionRange && /^(search|text|url|tel|password)$/.test(next.type)) next.setSelectionRange(start, end);
-      }
+
+  async function operation(command, payload, trigger) {
+    if (busy) return null;
+    busy = true;
+    if (trigger) trigger.setAttribute('aria-busy', 'true');
+    updateBusy();
+    try { return await C.request(command, payload); }
+    catch (error) { errorResult(error); return null; }
+    finally {
+      busy = false;
+      if (trigger) trigger.removeAttribute('aria-busy');
+      await refresh();
     }
   }
-  function assignFocusKeys() {
-    var counts = new Map();
-    document.querySelectorAll('a, button, input, select, textarea, summary').forEach(function(element) {
-      if (element.dataset.focusKey) return;
-      var record = element.closest('[data-record-key]');
-      var scopeKey = record ? record.dataset.recordKey : route.view;
-      var base = scopeKey + ':' + element.tagName + ':' + (element.getAttribute('aria-label') || element.name || element.textContent.trim().slice(0, 80));
-      var index = counts.get(base) || 0;
-      counts.set(base, index + 1);
-      element.dataset.focusKey = 'control:' + base + ':' + index;
-    });
+  async function run(action, ids, trigger, override) {
+    if (!ids.length || busy) return;
+    var chosen = ids.length === 1 ? data.tabs.find(function(row) { return row.id === ids[0]; }) : null;
+    var known = chosen && chosen.dirty && !chosen.asleep ? chosen : null;
+    if (known && action !== 'restore' && !(override && override.ignoreDrafts)) {
+      // We already know this page has typing in it: ask once, then go ahead.
+      var go = await C.confirm({ title: VERBS[action] + ' “' + tabTitle(known) + '”?', text: 'You typed something on this page that may not be saved. If you continue, that typing will be lost.', accept: VERBS[action] + ' anyway', destructive: true });
+      if (!go) return;
+      override = Object.assign({}, override, { ignoreDrafts: true, confirmed: true });
+    }
+    if ((action === 'archive' || action === 'close') && !(override && override.confirmed)) {
+      var accepted = await C.confirm({
+        title: VERBS[action] + ' ' + plural(ids.length, 'tab') + '?',
+        text: action === 'archive' ? 'They’ll close and be saved in Archive, so you can bring them back later. Tabs with unsaved typing stay open.' :
+          'They’ll close. Tabs with unsaved typing stay open, and you can undo this.',
+        accept: VERBS[action] + ' ' + plural(ids.length, 'tab'), destructive: action === 'close'
+      });
+      if (!accepted) return;
+    }
+    // Tabs picked here are explicit choices: keep-awake rules don't apply, unsaved typing still asks.
+    var options = { allowActive: true, explicit: true, reason: 'workbench', ignoreDrafts: !!(override && override.ignoreDrafts) };
+    if (action === 'archive') {
+      var first = chosen || data.tabs.find(function(row) { return row.id === ids[0]; });
+      options.label = first ? tabTitle(first) + (ids.length > 1 ? ' and ' + plural(ids.length - 1, 'more tab') : '') : plural(ids.length, 'archived tab');
+    }
+    var result = await operation('action.run', { action: action, tabIds: ids, options: options }, trigger);
+    if (!result) return;
+    if (action === 'archive' || action === 'close') ids.forEach(function(id) { selected.delete(id); });
+    var outcome = describe(action, result, ids, chosen);
+    showResult(outcome.text, { skipped: outcome.skipped, undo: outcome.changed > 0, force: outcome.force });
+    render();
   }
+
   async function refresh() {
     if (busy || loading) { refreshAgain = true; return; }
     loading = true;
-    document.getElementById('refresh-button').disabled = true;
     try {
       data = await C.request('view.get');
-      if (!Array.isArray(data.tabs) || !Array.isArray(data.workspaces)) throw new Error('The extension returned an incomplete view. Reload the extension, then refresh.');
-      var liveIds = new Set(data.tabs.map(function(row) { return row.id; }));
-      selected.forEach(function(id) { if (!liveIds.has(id)) selected.delete(id); });
-      if (inspectedId === null && data.focusedTabId && liveIds.has(data.focusedTabId)) inspectedId = data.focusedTabId;
-      if (inspectedId !== null && !liveIds.has(inspectedId)) inspectedId = null;
+      if (!Array.isArray(data.tabs) || !Array.isArray(data.workspaces)) throw new Error('The extension returned an incomplete view. Reload the extension, then this page.');
+      var live = new Set(data.tabs.map(function(row) { return row.id; }));
+      selected.forEach(function(id) { if (!live.has(id)) selected.delete(id); });
+      if (route.workspace && !workspaceById(route.workspace)) route.workspace = '';
       C.theme(data.settings.theme);
-      preserveFocus(render);
+      render();
     } catch (error) {
-      failed(error);
-      if (!data) content.replaceChildren(empty('Could not load your workbench', 'Use Refresh to reconnect. Your tabs have not been changed.'));
+      errorResult(error);
+      if (!data) content.replaceChildren(empty('Couldn’t load your tabs', 'Reload this page to try again. Your tabs have not been changed.'));
     } finally {
       loading = false;
       content.setAttribute('aria-busy', 'false');
-      document.getElementById('refresh-button').disabled = false;
       if (refreshAgain) { refreshAgain = false; refresh(); }
     }
   }
-  async function operation(command, payload, trigger, fallback) {
-    if (busy) { say('Wait for the current action to finish.'); return null; }
-    var focusTrigger = trigger && previewBox && previewBox.contains(trigger) ? previewTrigger : trigger;
-    busy = true;
-    if (trigger) { trigger.disabled = true; trigger.setAttribute('aria-busy', 'true'); }
-    say('Working locally…');
-    try {
-      var result = await C.request(command, payload);
-      say(C.resultText(result, fallback), 'success');
-      C.renderResult(document.getElementById('operation-outcome'), result, fallback);
-      if (resultBox && resultBox.isConnected) C.renderResult(resultBox, result, fallback);
-      return result;
-    } catch (error) { failed(error); return null; }
-    finally {
-      busy = false;
-      if (trigger && trigger.isConnected) { trigger.disabled = false; trigger.removeAttribute('aria-busy'); }
-      await refresh();
-      if (document.activeElement === document.body) restoreTrigger(focusTrigger);
-    }
+
+  function render() {
+    if (!data) return;
+    renderNavigation();
+    var workspace = route.view === 'tabs' && route.workspace ? workspaceById(route.workspace) : null;
+    var heading = $('view-title');
+    heading.tabIndex = -1;
+    heading.replaceChildren();
+    if (workspace) heading.append(dot(workspace.color), ' ', workspace.name);
+    else heading.textContent = VIEWS[route.view][0];
+    $('view-description').textContent = workspace ? workspaceSummary(workspace) : VIEWS[route.view][1];
+    $('view-actions').replaceChildren();
+    if (workspace) $('view-actions').append.apply($('view-actions'), workspaceButtons(workspace, true));
+    var undo = $('undo-button');
+    undo.disabled = !data.undoSummary || busy;
+    undo.title = data.undoSummary ? 'Undo your last action' : 'Nothing to undo';
+    if (route.view === 'tabs') renderTabs();
+    else if (route.view === 'duplicates') renderDuplicates();
+    else if (route.view === 'workspaces') renderWorkspaces();
+    else if (route.view === 'snapshots') renderSnapshots();
+    else renderArchive();
   }
-  function updateOptions(element, options, value) {
-    var signature = JSON.stringify(options);
-    if (element.dataset.options !== signature) {
-      element.replaceChildren();
-      options.forEach(function(option) { element.appendChild(n('option', { value: option[0], text: option[1] })); });
-      element.dataset.options = signature;
-    }
-    element.value = value;
+  function updateBusy() {
+    $('undo-button').disabled = busy || !data || !data.undoSummary;
+    document.querySelectorAll('[data-busy-sensitive]').forEach(function(element) { element.disabled = busy || element.dataset.blocked === 'true'; });
+    document.querySelectorAll('.menu').forEach(function(menu) { menu.classList.toggle('is-disabled', busy || menu.dataset.blocked === 'true'); });
   }
+
   function renderNavigation() {
-    var nav = document.getElementById('main-navigation');
+    var nav = $('main-navigation');
+    var extra = (data.duplicates || []).reduce(function(total, group) { return total + group.tabs.length - 1; }, 0);
+    var counts = { tabs: data.tabs.length, duplicates: extra || '', workspaces: data.workspaces.length || '', snapshots: (data.snapshots || []).length || '', archive: (data.archive || []).reduce(function(total, item) { return total + item.tabs.length; }, 0) || '' };
     if (!nav.children.length) {
-      Object.keys(views).forEach(function(key) {
-        var count = n('span', { class: 'nav-count' });
-        var link = n('a', { class: 'nav-link', href: 'dashboard.html?view=' + key, 'data-view': key, 'data-focus-key': 'nav-' + key }, [n('span', { text: views[key][0] }), count]);
+      Object.keys(VIEWS).forEach(function(key) {
+        var link = n('a', { class: 'nav-link', href: 'dashboard.html?view=' + key, 'data-view': key }, [n('span', { class: 'nav-label' }, [n('span', { text: VIEWS[key][0] })]), n('span', { class: 'nav-count' })]);
         link.addEventListener('click', function(event) { if (event.metaKey || event.ctrlKey) return; event.preventDefault(); navigate(key); });
         nav.appendChild(link);
       });
     }
-    var counts = { tabs: data.tabs.length, inbox: (data.inbox || []).length, duplicates: (data.duplicates || []).length, temporary: (data.temporary || []).length, workspaces: data.workspaces.length, archive: (data.archive || []).length, snapshots: (data.snapshots || []).length, neglected: (data.neglected || []).length };
     Array.from(nav.children).forEach(function(link) {
       var key = link.dataset.view;
       if (key === route.view && !route.workspace) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
-      link.lastChild.textContent = counts[key] === undefined ? '' : counts[key];
+      link.lastChild.textContent = counts[key];
     });
-    var rail = document.getElementById('workspace-navigation');
-    var railSignature = data.workspaces.map(function(workspace) { return [workspace.id, workspace.name, workspace.color, workspace.hibernated]; });
-    if (rail.dataset.signature !== JSON.stringify(railSignature)) {
-      rail.replaceChildren();
-      data.workspaces.forEach(function(workspace) {
-        var link = n('a', { class: 'nav-link', href: 'dashboard.html?view=tabs&workspace=' + encodeURIComponent(workspace.id), 'data-workspace': workspace.id, 'data-focus-key': 'workspace-rail-' + workspace.id }, [n('span', { class: 'workspace-rail-name' }, [n('span', { class: 'workspace-dot color-' + (nativeColors.includes(workspace.color) ? workspace.color : 'blue'), 'aria-hidden': 'true' }), n('span', { text: workspace.name })]), n('span', { class: 'nav-count', text: workspace.hibernated ? 'Asleep' : '' })]);
-        link.addEventListener('click', function(event) { if (event.metaKey || event.ctrlKey) return; event.preventDefault(); navigate('tabs', workspace.id); });
-        rail.appendChild(link);
-      });
-      if (!data.workspaces.length) rail.appendChild(n('p', { class: 'empty-rail', text: 'Create a workspace to keep a task together.' }));
-      rail.dataset.signature = JSON.stringify(railSignature);
-    }
-    Array.from(rail.querySelectorAll('[data-workspace]')).forEach(function(link) {
-      if (link.dataset.workspace === route.workspace) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
+    var rail = $('workspace-navigation');
+    rail.replaceChildren();
+    data.workspaces.forEach(function(workspace) {
+      var open = data.tabs.filter(function(row) { return row.workspaceId === workspace.id; }).length;
+      var link = n('a', { class: 'nav-link', href: 'dashboard.html?view=tabs&workspace=' + encodeURIComponent(workspace.id) }, [n('span', { class: 'nav-label' }, [dot(workspace.color), n('span', { text: workspace.name })]), n('span', { class: 'nav-count', text: workspace.hibernated ? 'Asleep' : open || '' })]);
+      if (route.view === 'tabs' && route.workspace === workspace.id) link.setAttribute('aria-current', 'page');
+      link.addEventListener('click', function(event) { if (event.metaKey || event.ctrlKey) return; event.preventDefault(); navigate('tabs', workspace.id); });
+      rail.appendChild(link);
     });
+    if (!data.workspaces.length) rail.appendChild(n('p', { class: 'rail-hint', text: 'None yet. Select tabs and choose Move to → New workspace.' }));
   }
-  function render() {
-    if (!data) return;
-    renderNavigation();
-    var rowView = ['tabs', 'inbox', 'temporary', 'neglected'].includes(route.view);
-    document.getElementById('app-shell').classList.toggle('without-inspector', !rowView && route.view !== 'duplicates');
-    document.getElementById('view-title').textContent = route.workspace && route.view === 'tabs' ? workspaceName(route.workspace) : views[route.view][0];
-    document.getElementById('view-description').textContent = views[route.view][1];
-    document.getElementById('filters').hidden = !rowView && !['timeline', 'duplicates'].includes(route.view);
-    document.getElementById('filters').classList.toggle('search-only', !rowView);
-    statusFilter.parentElement.hidden = !rowView;
-    windowFilter.parentElement.hidden = !rowView;
-    search.value = route.query;
-    statusFilter.value = route.status;
-    var windowMap = new Map();
-    data.tabs.forEach(function(row) { if (!windowMap.has(row.windowId)) windowMap.set(row.windowId, 'Window ' + (Number(row.windowOrdinal) + 1)); });
-    var windows = [['all', 'All windows']].concat(Array.from(windowMap).map(function(pair) { return [String(pair[0]), pair[1]]; }));
-    if (route.window !== 'all' && !windowMap.has(Number(route.window))) route.window = 'all';
-    updateOptions(windowFilter, windows, route.window);
-    undoButton.disabled = !data.undo;
-    undoButton.title = data.undo ? 'Restores URLs, order, groups and suspension state; not unsaved application state.' : 'No action available to undo.';
-    if (rowView) renderRows();
-    else if (route.view === 'duplicates') renderDuplicates();
-    else if (route.view === 'workspaces') renderWorkspaces();
-    else if (route.view === 'archive') renderArchive();
-    else if (route.view === 'snapshots') renderSnapshots();
-    else if (route.view === 'timeline') renderTimeline();
-    else if (route.view === 'insights') renderInsights();
-    if (rowView || route.view === 'duplicates') renderInspector();
-    assignFocusKeys();
-  }
-  function filterRows(rows) {
-    var terms = route.query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
-    return rows.filter(function(row) {
-      if (route.workspace && row.workspaceId !== route.workspace) return false;
-      if (route.window !== 'all' && row.windowId !== Number(route.window)) return false;
-      if (route.status === 'protected' && !(row.protectionReasons || []).length && !row.dirty && !row.snooze && !row.protection) return false;
-      if (route.status !== 'all' && route.status !== 'protected' && row.status !== route.status) return false;
-      var text = [row.title, row.originalUrl, row.url, row.domain, row.groupTitle, row.workspaceName, row.status].join(' ').toLocaleLowerCase();
-      return terms.every(function(term) { return text.includes(term); });
+
+  /* ---------- Tabs ---------- */
+  function menu(label, icon, build, attributes) {
+    var panel = n('div', { class: 'menu-panel', role: 'menu' });
+    var summary = n('summary', { 'aria-haspopup': 'menu' }, [C.icon(icon), label]);
+    var chev = C.icon('chevron'); chev.classList.add('chev'); summary.appendChild(chev);
+    var details = n('details', Object.assign({ class: 'menu' }, attributes || {}), [summary, panel]);
+    details.addEventListener('toggle', function() {
+      if (!details.open) return;
+      document.querySelectorAll('details.menu[open]').forEach(function(other) { if (other !== details) other.open = false; });
+      panel.replaceChildren.apply(panel, build());
+      var first = panel.querySelector('button'); if (first) first.focus();
     });
+    return details;
   }
-  function rowsForView() {
-    if (route.view === 'tabs') return data.tabs;
-    var source = data[route.view] || [];
-    return source.map(function(item) {
-      var id = typeof item === 'number' ? item : item.id || item.tabId;
-      var live = data.tabs.find(function(row) { return row.id === id; });
-      return live ? Object.assign({}, live, typeof item === 'object' ? item : {}) : null;
-    }).filter(Boolean);
-  }
-  function setupRows() {
-    if (currentContent === 'rows') return;
-    content.replaceChildren();
-    var toolbar = n('div', { class: 'list-toolbar' });
-    selectAll = n('input', { type: 'checkbox', 'aria-label': 'Select all visible tabs', 'data-focus-key': 'select-visible' });
-    selectAll.addEventListener('change', function() { visibleRows.forEach(function(row) { if (selectAll.checked) selected.add(row.id); else selected.delete(row.id); }); renderRows(); renderInspector(); });
-    listCount = n('span', { class: 'list-count' });
-    var clear = b('Clear selection', function() { selected.clear(); renderRows(); renderInspector(); }, { class: 'quiet' });
-    toolbar.append(n('label', { class: 'select-all' }, [selectAll, n('span', { text: 'Select visible' })]), n('div', { class: 'button-row' }, [listCount, clear, b('Selection actions', function() { inspector.scrollIntoView({ block: 'start' }); var heading = inspector.querySelector('h2'); if (heading) { heading.tabIndex = -1; heading.focus({ preventScroll: true }); } })]));
-    listHost = n('ul', { class: 'tab-list', 'aria-label': 'Browser tabs' });
-    var rowEmpty = empty('No tabs here', 'Try another view or clear your search and filters.');
-    rowEmpty.id = 'rows-empty';
-    content.append(toolbar, listHost, rowEmpty);
-    if (route.view === 'neglected') {
-      content.appendChild(n('p', { class: 'muted', text: 'The threshold is configurable in Settings. Recommendations use last foreground view or creation time; they do not measure whether a page is useful.' }));
-    }
-    rowsById.clear();
-    currentContent = 'rows';
-  }
-  function createRow(row) {
-    var item = n('li', { class: 'tab-row', 'data-tab-id': row.id });
-    var checkbox = n('input', { type: 'checkbox', tabindex: '-1', 'aria-label': 'Select ' + tabTitle(row) });
-    var title = b(tabTitle(row), function() { selected.clear(); inspectedId = item._row.id; rowFocusId = item._row.id; renderRows(); renderInspector(); }, { class: 'row-title', 'data-focus-key': 'row-' + row.id, tabindex: '-1' });
-    var url = n('span', { class: 'row-url' });
-    var meta = n('div', { class: 'row-meta' });
-    var state = n('span', { class: 'row-state' });
-    item.append(checkbox, n('div', { class: 'row-main' }, [title, url, meta]), state);
-    item._parts = { checkbox: checkbox, title: title, url: url, meta: meta, state: state };
-    checkbox.addEventListener('change', function() { if (checkbox.checked) selected.add(item._row.id); else selected.delete(item._row.id); inspectedId = item._row.id; renderRows(); renderInspector(); });
-    title.addEventListener('focus', function() { rowFocusId = item._row.id; });
-    title.addEventListener('keydown', function(event) {
-      var index = visibleRows.findIndex(function(candidate) { return candidate.id === item._row.id; });
-      var target;
-      if (event.key === 'ArrowDown') target = Math.min(visibleRows.length - 1, index + 1);
-      if (event.key === 'ArrowUp') target = Math.max(0, index - 1);
-      if (event.key === 'Home') target = 0;
-      if (event.key === 'End') target = visibleRows.length - 1;
-      if (target !== undefined) {
-        event.preventDefault();
-        rowFocusId = visibleRows[target].id;
-        inspectedId = rowFocusId;
-        renderRows(); renderInspector();
-        rowsById.get(rowFocusId)._parts.title.focus();
-      } else if (event.key === ' ') {
-        event.preventDefault();
-        if (selected.has(item._row.id)) selected.delete(item._row.id); else selected.add(item._row.id);
-        inspectedId = item._row.id;
-        renderRows(); renderInspector();
-      } else if (event.key.toLowerCase() === 'a' && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault(); visibleRows.forEach(function(candidate) { selected.add(candidate.id); }); renderRows(); renderInspector();
-      }
-    });
+  function menuItem(label, handler, extra) {
+    var item = C.button('', function(event) { event.currentTarget.closest('details').open = false; handler(event); }, { role: 'menuitem' });
+    if (extra) item.append(extra, ' ');
+    item.append(label);
     return item;
   }
-  function renderRows() {
-    setupRows();
-    visibleRows = filterRows(rowsForView());
-    var visibleIds = new Set(visibleRows.map(function(row) { return row.id; }));
-    rowsById.forEach(function(item, id) { if (!visibleIds.has(id)) { item.remove(); rowsById.delete(id); } });
-    if (!visibleIds.has(rowFocusId)) rowFocusId = visibleRows.length ? visibleRows[0].id : null;
-    visibleRows.forEach(function(row, index) {
-      var item = rowsById.get(row.id);
-      if (!item) { item = createRow(row); rowsById.set(row.id, item); }
-      item._row = row;
-      var parts = item._parts;
-      parts.checkbox.checked = selected.has(row.id);
-      parts.checkbox.setAttribute('aria-label', 'Select ' + tabTitle(row));
-      parts.title.textContent = tabTitle(row);
-      parts.title.title = tabTitle(row);
-      parts.title.tabIndex = row.id === rowFocusId ? 0 : -1;
-      parts.title.setAttribute('aria-pressed', row.id === inspectedId ? 'true' : 'false');
-      parts.url.textContent = row.originalUrl || row.url;
-      parts.url.title = row.originalUrl || row.url;
-      var metadata = ['Window ' + (Number(row.windowOrdinal) + 1)];
-      if (row.workspaceName) metadata.push(row.workspaceName);
-      if (row.groupTitle) metadata.push('Group: ' + row.groupTitle);
-      if (row.pinned) metadata.push('Pinned');
-      if (row.audible) metadata.push('Playing audio');
-      if (row.dirty) metadata.push('Unsaved input');
-      if (row.snooze) metadata.push('Snoozed: ' + C.expiry(row.snooze));
-      if (row.protection) metadata.push(row.protection.kind + ': ' + C.expiry(row.protection));
-      if (row.expiresAt) metadata.push((row.expiresAt <= Date.now() ? 'Overdue: ' : 'Expires: ') + C.date(row.expiresAt));
-      if (row.overdue && row.reasons) metadata.push('Kept open: ' + row.reasons.join(', '));
-      var metaText = metadata.join(' | ');
-      if (parts.meta.dataset.text !== metaText) { parts.meta.replaceChildren(); metadata.forEach(function(text) { parts.meta.appendChild(n('span', { text: text })); }); parts.meta.dataset.text = metaText; }
-      parts.state.textContent = row.overdue ? 'Overdue' : row.status;
-      parts.state.className = 'row-state ' + (row.overdue ? 'overdue' : row.status);
-      item.classList.toggle('is-selected', selected.has(row.id));
-      item.classList.toggle('is-inspected', row.id === inspectedId);
-      var current = listHost.children[index];
-      if (current !== item) listHost.insertBefore(item, current || null);
+  function selectedRows() { return data.tabs.filter(function(row) { return selected.has(row.id); }); }
+
+  function buildTabsView() {
+    var ui = {};
+    ui.search = n('input', { type: 'search', placeholder: 'Search by title, site or URL', autocomplete: 'off', 'aria-label': 'Search tabs' });
+    ui.search.addEventListener('input', function() { route.query = ui.search.value; saveRoute(); renderTabs(); });
+    var searchField = n('label', { class: 'search-field' }, [C.icon('search'), ui.search, n('kbd', { class: 'search-key', text: '/' })]);
+    ui.status = n('fieldset', { class: 'segmented' }, [n('legend', { class: 'sr-only', text: 'Show' })]);
+    [['all', 'All'], ['awake', 'Awake'], ['asleep', 'Asleep'], ['kept', 'Kept awake']].forEach(function(pair) {
+      var input = n('input', { type: 'radio', name: 'status', value: pair[0] });
+      input.addEventListener('change', function() { route.status = pair[0]; saveRoute(); renderTabs(); });
+      ui.status.appendChild(n('label', {}, [input, n('span', { text: pair[1] })]));
     });
-    listHost.hidden = !visibleRows.length;
-    document.getElementById('rows-empty').hidden = !!visibleRows.length;
-    var selectedVisible = visibleRows.filter(function(row) { return selected.has(row.id); }).length;
-    selectAll.checked = visibleRows.length > 0 && selectedVisible === visibleRows.length;
-    selectAll.indeterminate = selectedVisible > 0 && selectedVisible < visibleRows.length;
-    selectAll.disabled = !visibleRows.length;
-    listCount.textContent = visibleRows.length + ' visible' + (selected.size ? ' / ' + selected.size + ' selected' : '');
-  }
-  function renderInspector() {
-    var rows = activeRows(), ids = rows.map(function(row) { return row.id; });
-    var signature = ids.slice().sort().join(',') + ':' + rows.map(function(row) { return row.id + '/' + row.groupId; }).join('|') + ':' + data.workspaces.map(function(workspace) { return workspace.id + workspace.name; }).join('|');
-    if (signature === inspectorKey) {
-      var info = inspector.querySelector('.selection-info');
-      if (info) info.textContent = selectionDescription(rows);
-      var heading = inspector.querySelector('.inspector-title'), url = inspector.querySelector('.record-url');
-      if (heading) heading.textContent = rows.length === 1 ? tabTitle(rows[0]) : rows.length + ' tabs selected';
-      if (url && rows.length === 1) url.textContent = rows[0].originalUrl || rows[0].url;
-      return;
-    }
-    inspectorKey = signature;
-    inspector.replaceChildren();
-    resultBox = n('div', { class: 'operation-result', role: 'status', 'aria-live': 'polite', hidden: true });
-    previewBox = n('div', { hidden: true });
-    if (!rows.length) {
-      inspector.append(n('h2', { text: 'Selection' }), n('p', { class: 'muted', text: 'Inspect a tab or use Space to select several. Actions check draft, audio, meeting and snooze protection before changing anything.' }), resultBox);
-      return;
-    }
-    inspector.append(n('h2', { class: 'inspector-title', text: rows.length === 1 ? tabTitle(rows[0]) : rows.length + ' tabs selected' }), n('p', { class: 'muted selection-info', text: selectionDescription(rows) }));
-    if (rows.length === 1) {
-      inspector.append(n('p', { class: 'record-url', text: rows[0].originalUrl || rows[0].url }), b('Open tab', function(event) { C.focusTab(activeRows()[0]).catch(failed); }, { 'data-focus-key': 'open-selected-tab' }));
-    }
-    var includeActive = n('input', { type: 'checkbox', 'data-focus-key': 'include-active' });
-    var actions = n('div', { class: 'button-row' });
-    [['suspend', 'Suspend'], ['restore', 'Restore'], ['archive', 'Archive'], ['close', 'Close']].forEach(function(action) {
-      actions.appendChild(b(action[1], function(event) { previewAction(action[0], idsForAction(), { allowActive: includeActive.checked }, event.currentTarget); }, { class: action[0] === 'close' ? 'danger' : '', 'data-focus-key': 'action-' + action[0] }));
+    ui.windowSelect = n('select', { 'aria-label': 'Window' });
+    ui.windowSelect.addEventListener('change', function() { route.window = ui.windowSelect.value; saveRoute(); renderTabs(); });
+    ui.filters = n('div', { class: 'filters' }, [searchField, ui.status, ui.windowSelect]);
+
+    ui.selectAll = n('input', { type: 'checkbox', 'aria-label': 'Select all shown tabs' });
+    ui.selectAll.addEventListener('change', function() {
+      visible.forEach(function(row) { if (ui.selectAll.checked) selected.add(row.id); else selected.delete(row.id); });
+      renderTabs();
     });
-    inspector.append(n('div', { class: 'inspector-section' }, [n('h3', { text: 'Safe actions' }), actions, C.check('Allow selected active tabs to suspend', includeActive, 'Drafts, audio, meetings and snoozes remain protected.'), previewBox, resultBox]));
-    if (route.view === 'inbox') inspector.appendChild(b('Keep & mark reviewed', function(event) { operation('inbox.keep', { tabIds: idsForAction() }, event.currentTarget, 'Marked reviewed; these tabs leave Inbox.'); }, { 'data-focus-key': 'inbox-keep' }));
-    inspector.append(buildSnooze(), buildProtection(), buildAssignment(), buildGrouping(), buildExpiry());
-    inspector.appendChild(n('p', { class: 'muted', text: 'Undo restores URLs, tab order, groups and suspension state. It cannot restore unsaved page or application state.' }));
+    ui.count = n('span');
+    ui.countMuted = n('span', { class: 'muted' });
+    var count = n('label', { class: 'selection-count' }, [ui.selectAll, ui.count, ui.countMuted]);
+    ui.suspend = button('Suspend', function(event) { run('suspend', selectedRows().filter(function(row) { return !row.asleep; }).map(function(row) { return row.id; }), event.currentTarget); }, { class: 'small', 'data-busy-sensitive': '' }, 'moon');
+    ui.wake = button('Wake', function(event) { run('restore', selectedRows().filter(function(row) { return row.asleep; }).map(function(row) { return row.id; }), event.currentTarget); }, { class: 'small', 'data-busy-sensitive': '' }, 'sun');
+    ui.keep = menu('Keep awake', 'clock', function() {
+      var ids = selectedRows().map(function(row) { return row.id; });
+      var items = [
+        menuItem('For 1 hour', function() { snooze(ids, { minutes: 60 }); }),
+        menuItem('Until tomorrow morning', function() { snooze(ids, { mode: 'tomorrow' }); }),
+        menuItem('Until the browser restarts', function() { snooze(ids, { mode: 'restart' }); })
+      ];
+      if (selectedRows().some(function(row) { return row.snooze; })) items.push(n('hr'), menuItem('Stop keeping awake', function() { snooze(ids, null); }));
+      return items;
+    });
+    ui.move = menu('Move to', 'folder', function() {
+      var ids = selectedRows().map(function(row) { return row.id; });
+      var items = data.workspaces.map(function(workspace) { return menuItem(workspace.name, function() { assign(workspace, ids); }, dot(workspace.color)); });
+      if (items.length) items.push(n('hr'));
+      items.push(menuItem('New workspace…', function() { newWorkspace(ids); }));
+      if (selectedRows().some(function(row) { return row.workspaceId; })) items.push(menuItem('Remove from workspace', function() { assign(null, ids); }));
+      return items;
+    });
+    ui.archive = button('Archive', function(event) { run('archive', Array.from(selected), event.currentTarget); }, { class: 'small', 'data-busy-sensitive': '' }, 'archive');
+    ui.close = button('Close', function(event) { run('close', Array.from(selected), event.currentTarget); }, { class: 'small danger', 'data-busy-sensitive': '' }, 'x');
+    ui.clear = button('Clear', function() { selected.clear(); renderTabs(); }, { class: 'small quiet' });
+    ui.actions = n('div', { class: 'button-row' }, [ui.suspend, ui.wake, ui.keep, ui.move, ui.archive, ui.close, ui.clear]);
+    ui.bar = n('div', { class: 'selection-bar' }, [count, ui.actions]);
+    ui.list = n('ul', { class: 'tab-list', 'aria-label': 'Tabs' });
+    ui.empty = empty('No tabs match', 'Try a different search or filter.');
+    return ui;
   }
-  function selectionDescription(rows) {
-    var protectedCount = rows.filter(function(row) { return (row.protectionReasons || []).length || row.dirty || row.snooze || row.protection; }).length;
-    return rows.length + ' tab' + (rows.length === 1 ? '' : 's') + '; ' + rows.filter(function(row) { return !row.asleep; }).length + ' awake' + (protectedCount ? '; ' + protectedCount + ' with protections' : '') + (rows.length === 1 && rows[0].protectionReasons && rows[0].protectionReasons.length ? '. ' + rows[0].protectionReasons.join(', ') : '');
+
+  function renderTabs() {
+    if (contentKey !== 'tabs' || !tabsUi) {
+      tabsUi = buildTabsView();
+      content.replaceChildren(tabsUi.filters, tabsUi.bar, tabsUi.list, tabsUi.empty);
+      contentKey = 'tabs';
+      rowNodes.clear();
+      headingNodes.clear();
+    }
+    var ui = tabsUi;
+    if (document.activeElement !== ui.search && ui.search.value !== route.query) ui.search.value = route.query;
+    ui.status.querySelectorAll('input').forEach(function(input) { input.checked = input.value === route.status; });
+    var labels = windowLabels();
+    if (route.window !== 'all' && !labels.has(Number(route.window))) route.window = 'all';
+    var options = [['all', 'All windows']].concat(Array.from(labels).map(function(pair) { return [String(pair[0]), pair[1] + (pair[0] === data.focusedWindowId ? ' (this one)' : '')]; }));
+    var signature = JSON.stringify(options);
+    if (ui.windowSelect.dataset.signature !== signature) {
+      ui.windowSelect.replaceChildren.apply(ui.windowSelect, options.map(function(option) { return n('option', { value: option[0], text: option[1] }); }));
+      ui.windowSelect.dataset.signature = signature;
+    }
+    ui.windowSelect.value = route.window;
+    ui.windowSelect.hidden = labels.size < 2;
+
+    var terms = route.query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    visible = data.tabs.filter(function(row) {
+      if (route.workspace && row.workspaceId !== route.workspace) return false;
+      if (route.window !== 'all' && String(row.windowId) !== route.window) return false;
+      if (route.status === 'awake' && row.asleep) return false;
+      if (route.status === 'asleep' && !row.asleep) return false;
+      if (route.status === 'kept' && !isKept(row)) return false;
+      var text = [row.title, row.originalUrl, row.domain, row.groupTitle, row.workspaceName].join(' ').toLocaleLowerCase();
+      return terms.every(function(term) { return text.includes(term); });
+    });
+    var showHeadings = route.window === 'all' && labels.size > 1;
+    var nodes = [], lastWindow = null, perWindow = new Map();
+    visible.forEach(function(row) { perWindow.set(row.windowId, (perWindow.get(row.windowId) || 0) + 1); });
+    if (focusId === null || !visible.some(function(row) { return row.id === focusId; })) focusId = visible.length ? visible[0].id : null;
+    visible.forEach(function(row) {
+      if (showHeadings && row.windowId !== lastWindow) {
+        lastWindow = row.windowId;
+        var heading = headingNodes.get(row.windowId) || n('li', { class: 'window-heading', role: 'presentation' });
+        heading.textContent = labels.get(row.windowId) + (row.windowId === data.focusedWindowId ? ' · this window' : '') + ' · ' + plural(perWindow.get(row.windowId), 'tab');
+        headingNodes.set(row.windowId, heading);
+        nodes.push(heading);
+      }
+      var item = rowNodes.get(row.id) || createRow();
+      rowNodes.set(row.id, item);
+      updateRow(item, row);
+      nodes.push(item);
+    });
+    var keep = new Set(nodes);
+    Array.from(ui.list.children).forEach(function(child) { if (!keep.has(child)) child.remove(); });
+    rowNodes.forEach(function(item, id) { if (!item.isConnected && !keep.has(item)) rowNodes.delete(id); });
+    nodes.forEach(function(node, index) { if (ui.list.children[index] !== node) ui.list.insertBefore(node, ui.list.children[index] || null); });
+    ui.list.hidden = !visible.length;
+    ui.empty.hidden = !!visible.length;
+    if (!visible.length) {
+      var filtered = route.query || route.status !== 'all' || route.window !== 'all';
+      ui.empty.querySelector('h2').textContent = filtered ? 'No tabs match' : route.workspace ? 'No open tabs in this workspace' : 'No tabs to show';
+      ui.empty.querySelector('p').textContent = filtered ? 'Try a different search or filter.' : route.workspace ? 'Use “Switch to” above to reopen its saved tabs, or move tabs here from the Tabs page.' : 'Open some web pages and they’ll appear here.';
+    }
+
+    var picked = selectedRows();
+    var shownSelected = visible.filter(function(row) { return selected.has(row.id); }).length;
+    ui.bar.classList.toggle('has-selection', picked.length > 0);
+    ui.selectAll.checked = visible.length > 0 && shownSelected === visible.length;
+    ui.selectAll.indeterminate = shownSelected > 0 && shownSelected < visible.length;
+    ui.selectAll.disabled = !visible.length;
+    var awake = visible.filter(function(row) { return !row.asleep; }).length;
+    ui.count.textContent = picked.length ? picked.length + ' selected' : plural(visible.length, 'tab');
+    ui.countMuted.textContent = picked.length || !visible.length ? '' : awake === visible.length ? '· all awake' : !awake ? '· all asleep' : '· ' + awake + ' awake · ' + (visible.length - awake) + ' asleep';
+    ui.actions.hidden = !picked.length;
+    ui.suspend.dataset.blocked = String(!picked.some(function(row) { return !row.asleep; }));
+    ui.wake.dataset.blocked = String(!picked.some(function(row) { return row.asleep; }));
+    updateBusy();
   }
-  function details(title, children) { return n('details', {}, [n('summary', { text: title })].concat(children)); }
-  function savedTabsDetails(rows, title) {
-    var detail = n('details', {}, [n('summary', { text: (title || 'Saved tabs') + ' (' + rows.length + ')' })]);
+
+  function createRow() {
+    var item = n('li', { class: 'tab-row' });
+    var check = n('input', { type: 'checkbox', tabindex: '-1' });
+    var favicon = n('img', { class: 'row-favicon', alt: '', width: '16', height: '16', loading: 'lazy' });
+    var title = n('button', { type: 'button', class: 'row-title', tabindex: '-1' });
+    var siteText = n('span', { class: 'row-site' });
+    var sub = n('div', { class: 'row-sub' }, [siteText]);
+    var state = n('span', { class: 'state' });
+    var action = n('button', { type: 'button', class: 'small row-action', tabindex: '-1', 'data-busy-sensitive': '' });
+    item.append(check, favicon, n('div', { class: 'row-main' }, [title, sub]), state, action);
+    item._parts = { check: check, favicon: favicon, title: title, site: siteText, sub: sub, state: state, action: action };
+    check.addEventListener('change', function() {
+      if (check.checked) selected.add(item._row.id); else selected.delete(item._row.id);
+      focusId = item._row.id;
+      renderTabs();
+    });
+    title.addEventListener('click', function() { C.focusTab(item._row).catch(errorResult); });
+    title.addEventListener('focus', function() { focusId = item._row.id; });
+    title.addEventListener('keydown', function(event) { rowKeys(event, item); });
+    action.addEventListener('click', function(event) { run(item._row.asleep ? 'restore' : 'suspend', [item._row.id], event.currentTarget); });
+    return item;
+  }
+  function updateRow(item, row) {
+    var parts = item._parts;
+    item._row = row;
+    item.classList.toggle('is-selected', selected.has(row.id));
+    item.classList.toggle('is-asleep', row.asleep);
+    parts.check.checked = selected.has(row.id);
+    parts.check.setAttribute('aria-label', 'Select ' + tabTitle(row));
+    var icon = C.favicon(row.originalUrl);
+    if (parts.favicon.getAttribute('src') !== icon) parts.favicon.src = icon;
+    parts.title.textContent = tabTitle(row);
+    parts.title.title = 'Go to ' + tabTitle(row);
+    var focusable = row.id === focusId;
+    parts.title.tabIndex = focusable ? 0 : -1;
+    parts.action.tabIndex = focusable ? 0 : -1;
+    parts.site.textContent = site(row.originalUrl);
+    parts.site.title = row.originalUrl;
+    var tags = [];
+    var workspace = row.workspaceId && workspaceById(row.workspaceId);
+    if (workspace && route.workspace !== workspace.id) tags.push(n('span', { class: 'tag' }, [dot(workspace.color), workspace.name]));
+    if (row.groupTitle) tags.push(n('span', { class: 'tag' }, [dot(row.groupColor), row.groupTitle]));
+    if (row.pinned) tags.push(n('span', { class: 'tag', text: 'Pinned' }));
+    if (row.audible) tags.push(n('span', { class: 'tag', text: 'Playing audio' }));
+    if (row.dirty && !row.asleep) tags.push(n('span', { class: 'tag warn', text: 'Unsaved typing' }));
+    if (row.snooze && !row.asleep) tags.push(n('span', { class: 'tag warn', text: 'Kept awake ' + until(row.snooze) }));
+    if ((row.protectionReasons || []).includes('Always keep awake')) tags.push(n('span', { class: 'tag warn', text: 'Site always awake' }));
+    var signature = tags.map(function(tag) { return tag.textContent; }).join('|');
+    if (parts.sub.dataset.tags !== signature) {
+      Array.from(parts.sub.children).slice(1).forEach(function(child) { child.remove(); });
+      tags.forEach(function(tag) { parts.sub.appendChild(tag); });
+      parts.sub.dataset.tags = signature;
+    }
+    // The action button already says Suspend or Wake; only call out the states worth noticing.
+    parts.state.textContent = row.asleep ? 'Asleep' : row.status === 'loading' ? 'Loading' : '';
+    parts.state.className = 'state ' + (row.asleep ? 'asleep' : row.status === 'loading' ? 'loading' : '');
+    parts.action.replaceChildren(C.icon(row.asleep ? 'sun' : 'moon'), row.asleep ? 'Wake' : 'Suspend');
+    parts.action.setAttribute('aria-label', (row.asleep ? 'Wake ' : 'Suspend ') + tabTitle(row));
+  }
+  function rowKeys(event, item) {
+    var index = visible.findIndex(function(row) { return row.id === item._row.id; });
+    var target;
+    if (event.key === 'ArrowDown') target = Math.min(visible.length - 1, index + 1);
+    else if (event.key === 'ArrowUp') target = Math.max(0, index - 1);
+    else if (event.key === 'Home') target = 0;
+    else if (event.key === 'End') target = visible.length - 1;
+    if (target !== undefined) {
+      event.preventDefault();
+      focusId = visible[target].id;
+      renderTabs();
+      rowNodes.get(focusId)._parts.title.focus();
+    } else if (event.key === ' ') {
+      event.preventDefault();
+      if (selected.has(item._row.id)) selected.delete(item._row.id); else selected.add(item._row.id);
+      renderTabs();
+    } else if (event.key.toLowerCase() === 'a' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      visible.forEach(function(row) { selected.add(row.id); });
+      renderTabs();
+    }
+  }
+  async function snooze(ids, value) {
+    var result = await operation(value ? 'snooze.set' : 'snooze.clear', Object.assign({ tabIds: ids }, value || {}));
+    if (result) showResult(value ? 'Keeping ' + plural(result.changed.length, 'tab') + ' awake ' + until(result) + '.' : 'Stopped keeping ' + plural(result.changed.length, 'tab') + ' awake.');
+  }
+  async function assign(workspace, ids) {
+    var result = await operation('workspace.assign', { id: workspace ? workspace.id : null, tabIds: ids });
+    if (!result) return;
+    selected.clear();
+    showResult(workspace ? 'Moved ' + plural(result.changed.length, 'tab') + ' to ' + workspace.name + '.' : 'Removed ' + plural(result.changed.length, 'tab') + ' from their workspace.', { skipped: result.skipped });
+    render();
+  }
+  function unusedColor() {
+    var used = new Set(data.workspaces.map(function(workspace) { return workspace.color; }));
+    return COLORS.find(function(color) { return !used.has(color); }) || COLORS[data.workspaces.length % COLORS.length];
+  }
+  async function newWorkspace(ids) {
+    var input = n('input', { type: 'text', maxlength: '60', placeholder: 'e.g. Work, Trip planning', required: '' });
+    var accepted = await C.confirm({ title: 'New workspace', text: ids.length ? 'The ' + plural(ids.length, 'selected tab') + ' will move into it.' : '', detail: C.field('Name', input), accept: 'Create workspace', focus: input });
+    var name = input.value.trim();
+    if (!accepted || !name) return;
+    var result = await operation('workspace.create', { name: name, color: unusedColor(), tabIds: ids });
+    if (!result) return;
+    selected.clear();
+    showResult('Created ' + name + (ids.length ? ' with ' + plural((result.changed || []).length, 'tab') + '.' : '.'));
+    render();
+  }
+
+  /* ---------- Duplicates ---------- */
+  function survivorOf(group) {
+    var key = group.workspaceId + '|' + group.url;
+    var choice = duplicateChoice.get(key);
+    if (!group.tabs.some(function(row) { return row.id === choice; })) choice = group.recommendedSurvivorId || group.tabs[0].id;
+    duplicateChoice.set(key, choice);
+    return choice;
+  }
+  async function closeDuplicates(groups, trigger) {
+    var plans = groups.map(function(group) { return { survivorId: survivorOf(group), tabIds: group.tabs.map(function(row) { return row.id; }) }; });
+    var extra = plans.reduce(function(total, plan) { return total + plan.tabIds.length - 1; }, 0);
+    if (!await C.confirm({ title: 'Close ' + plural(extra, 'extra copy', 'extra copies') + '?', text: 'One copy of each page stays open. Copies with unsaved typing stay open too. You can undo this.', accept: 'Close ' + plural(extra, 'copy', 'copies'), destructive: true })) return;
+    var result = await operation('duplicates.merge', { groups: plans }, trigger);
+    if (!result) return;
+    var outcome = describe('close', result);
+    showResult(outcome.text, { skipped: outcome.skipped, undo: outcome.changed > 0 });
+  }
+  function renderDuplicates() {
+    contentKey = 'duplicates';
+    var groups = data.duplicates || [];
+    if (!groups.length) return content.replaceChildren(empty('No duplicate tabs', 'Every open page is open only once. Pages that differ in any part of the URL count as different pages.'));
+    var extra = groups.reduce(function(total, group) { return total + group.tabs.length - 1; }, 0);
+    var summary = n('div', { class: 'panel inline-form summary-bar' }, [n('p', { class: 'muted', text: plural(groups.length, 'page') + ' open more than once · ' + plural(extra, 'extra copy', 'extra copies') + '.' }), button('Close all extra copies', function(event) { closeDuplicates(groups, event.currentTarget); }, { class: 'primary', 'data-busy-sensitive': '' })]);
+    var list = n('ul', { class: 'record-list' });
+    groups.forEach(function(group, index) {
+      var keep = survivorOf(group);
+      var key = group.workspaceId + '|' + group.url;
+      var item = n('li', { class: 'record' }, [
+        n('div', { class: 'record-heading' }, [n('h2', {}, [n('img', { class: 'row-favicon', src: C.favicon(group.url), alt: '' }), tabTitle(group.tabs[0])]), n('span', { class: 'tag', text: group.tabs.length + ' copies' })]),
+        n('p', { class: 'record-url', text: group.url }),
+        n('p', { class: 'muted', text: 'Keep this copy:' })
+      ]);
+      group.tabs.forEach(function(row) {
+        var input = n('input', { type: 'radio', name: 'duplicate-' + index, value: row.id, checked: keep === row.id });
+        input.addEventListener('change', function() { duplicateChoice.set(key, row.id); });
+        var facts = [windowLabels().get(row.windowId), 'tab ' + (Number(row.index) + 1), row.asleep ? 'asleep' : 'awake'];
+        if (row.pinned) facts.push('pinned');
+        if (row.dirty) facts.push('has unsaved typing');
+        if (row.id === group.recommendedSurvivorId) facts.push('recommended');
+        item.appendChild(n('label', { class: 'choice' }, [input, n('span', { text: tabTitle(row) }, [n('small', { text: facts.join(' · ') })])]));
+      });
+      item.appendChild(n('div', { class: 'button-row' }, [button('Close ' + plural(group.tabs.length - 1, 'extra copy', 'extra copies'), function(event) { closeDuplicates([group], event.currentTarget); }, { 'data-busy-sensitive': '' })]));
+      list.appendChild(item);
+    });
+    content.replaceChildren(summary, list);
+  }
+
+  /* ---------- Workspaces ---------- */
+  function workspaceSummary(workspace) {
+    var open = data.tabs.filter(function(row) { return row.workspaceId === workspace.id; });
+    var asleep = open.filter(function(row) { return row.asleep; }).length;
+    var openUids = new Set(open.map(function(row) { return row.uid; }));
+    var closed = (workspace.savedTabs || []).filter(function(entry) { return !openUids.has(entry.uid); }).length;
+    var parts = [plural(open.length, 'tab') + ' open' + (!open.length ? '' : asleep === 0 ? ' (all awake)' : asleep === open.length ? ' (all asleep)' : ' (' + asleep + ' asleep)')];
+    if (closed) parts.push(closed + ' saved, not open');
+    var minutes = workspace.policy && workspace.policy.suspendMinutes;
+    if (minutes != null) parts.push(Number(minutes) === 0 ? 'never suspends automatically' : 'suspends after ' + timerLabel(minutes));
+    return parts.join(' · ');
+  }
+  function workspaceButtons(workspace, compact) {
+    var current = data.currentWorkspaceId === workspace.id;
+    var buttons = [
+      button(current ? 'Wake & focus here' : 'Switch to', function(event) { switchWorkspace(workspace, event.currentTarget); }, { class: 'primary small', 'data-busy-sensitive': '', title: 'Wake this workspace’s tabs and put tabs from other workspaces to sleep' }, 'sun'),
+      button('Put to sleep', function(event) { hibernate(workspace, event.currentTarget); }, { class: 'small', 'data-busy-sensitive': '' }, 'moon')
+    ];
+    if (!compact) buttons.push(
+      button('Show tabs', function() { navigate('tabs', workspace.id); }, { class: 'small' }),
+      button('Edit', function() { editing = workspace.id; renderWorkspaces(); var input = content.querySelector('.panel input'); if (input) input.focus(); }, { class: 'small' }),
+      button('Delete', function(event) { deleteWorkspace(workspace, event.currentTarget); }, { class: 'small danger', 'data-busy-sensitive': '' })
+    );
+    return buttons;
+  }
+  async function switchWorkspace(workspace, trigger) {
+    var result = await operation('workspace.switch', { id: workspace.id }, trigger);
+    if (!result) return;
+    var woke = (result.restored || []).length + ((result.awakened && result.awakened.changed) || []).length;
+    var slept = (result.changed || []).length;
+    var skipped = (result.skipped || []).filter(function(row) { return !(row.reasons || []).every(function(reason) { return IGNORED.includes(reason); }); });
+    if (!result.switched) return showResult('Couldn’t switch to ' + workspace.name + '. ' + ((result.errors || [])[0] && result.errors[0].reasons ? result.errors[0].reasons.join(', ') : 'Its tabs could not be opened.'), { error: true, skipped: skipped });
+    var text = 'Switched to ' + workspace.name + '.';
+    if (woke) text += ' Woke ' + plural(woke, 'tab') + '.';
+    if (slept) text += ' Put ' + plural(slept, 'tab') + ' from other workspaces to sleep.';
+    if (skipped.length) text += ' ' + plural(skipped.length, 'tab') + ' stayed awake.';
+    showResult(text, { skipped: skipped, undo: slept > 0 });
+  }
+  async function hibernate(workspace, trigger) {
+    var result = await operation('workspace.hibernate', { id: workspace.id }, trigger);
+    if (!result) return;
+    var outcome = describe('suspend', result);
+    var text = outcome.changed ? 'Put ' + plural(outcome.changed, 'tab') + ' in ' + workspace.name + ' to sleep.' : 'Nothing in ' + workspace.name + ' needed to sleep.';
+    if (outcome.skipped.length) text += ' ' + plural(outcome.skipped.length, 'tab') + ' stayed awake.';
+    showResult(text, { skipped: outcome.skipped, undo: outcome.changed > 0, force: outcome.force });
+  }
+  async function deleteWorkspace(workspace, trigger) {
+    var targets = [['', 'No workspace']].concat(data.workspaces.filter(function(item) { return item.id !== workspace.id; }).map(function(item) { return [item.id, item.name]; }));
+    var reassign = C.select(targets, '');
+    var accepted = await C.confirm({ title: 'Delete ' + workspace.name + '?', text: 'Open tabs stay open. Saved tabs that aren’t open go to Archive if they have no new workspace.', detail: C.field('Move its tabs to', reassign), accept: 'Delete workspace', destructive: true });
+    if (!accepted) return;
+    var result = await operation('workspace.delete', { id: workspace.id, reassignToId: reassign.value || null }, trigger);
+    if (result) showResult('Deleted ' + workspace.name + '.' + (result.archivedId ? ' Its closed tabs were saved in Archive.' : ''));
+  }
+  function workspaceEditor(workspace) {
+    var policy = workspace && workspace.policy || {};
+    var legacy = data.legacySettings || {};
+    var form = n('form', { class: 'panel' });
+    var name = n('input', { type: 'text', maxlength: '60', required: '', value: workspace ? workspace.name : '', placeholder: 'e.g. Work' });
+    var color = workspace ? workspace.color : unusedColor();
+    var swatches = n('div', { class: 'swatches', role: 'radiogroup', 'aria-label': 'Color' });
+    COLORS.forEach(function(value) {
+      swatches.appendChild(n('label', { title: value }, [n('input', { type: 'radio', name: 'workspace-color', value: value, checked: value === color, 'aria-label': value }), n('span', { class: 'dot ' + colorClass(value) })]));
+    });
+    var timer = C.select([['', 'Same as Settings (' + timerLabel(legacy.gsTimeToSuspend) + ')']].concat(TIMER_OPTIONS), policy.suspendMinutes == null ? '' : String(policy.suspendMinutes));
+    var rules = {};
+    var more = n('details', {}, [n('summary', { text: 'More rules' })]);
+    var grid = n('div', { class: 'form-grid' });
+    [['ignorePinned', 'Keep pinned tabs awake'], ['ignoreAudio', 'Keep tabs playing audio awake'], ['ignoreForms', 'Keep tabs with unsaved typing awake'], ['ignoreActive', 'Keep each window’s active tab awake']].forEach(function(pair) {
+      rules[pair[0]] = C.select([['', 'Same as Settings'], ['true', 'Yes'], ['false', 'No']], policy[pair[0]] == null ? '' : String(policy[pair[0]]));
+      grid.appendChild(C.field(pair[1], rules[pair[0]]));
+    });
+    rules.countEnabled = C.select([['', 'Same as Settings'], ['true', 'On'], ['false', 'Off']], policy.countEnabled == null ? '' : String(policy.countEnabled));
+    var limit = n('input', { type: 'number', min: '2', step: '1', value: policy.awakeLimit == null ? '' : policy.awakeLimit, placeholder: String(data.settings.awakeLimit) });
+    var target = n('input', { type: 'number', min: '1', step: '1', value: policy.awakeTarget == null ? '' : policy.awakeTarget, placeholder: String(data.settings.awakeTarget) });
+    grid.append(C.field('Tab limit for this workspace', rules.countEnabled), C.field('Most tabs awake at once', limit), C.field('Then put tabs to sleep until only this many are awake', target));
+    more.appendChild(grid);
+    var error = n('p', { class: 'error-text', hidden: true });
+    var save = n('button', { type: 'submit', class: 'primary', text: workspace ? 'Save' : 'Create workspace' });
+    form.append(n('h2', { text: workspace ? 'Edit ' + workspace.name : 'New workspace' }), n('div', { class: 'form-grid' }, [C.field('Name', name), C.field('Suspend its tabs after', timer)]), n('div', { class: 'field' }, [n('span', { text: 'Color' }), swatches]), more, error, n('div', { class: 'button-row' }, [save, C.button('Cancel', function() { editing = null; renderWorkspaces(); })]));
+    form.addEventListener('submit', async function(event) {
+      event.preventDefault();
+      if (!name.value.trim()) { name.focus(); return; }
+      var updated = { suspendMinutes: timer.value === '' ? null : Number(timer.value), awakeLimit: limit.value === '' ? null : Number(limit.value), awakeTarget: target.value === '' ? null : Number(target.value) };
+      Object.keys(rules).forEach(function(key) { updated[key] = rules[key].value === '' ? null : rules[key].value === 'true'; });
+      var effectiveLimit = updated.awakeLimit == null ? data.settings.awakeLimit : updated.awakeLimit;
+      var effectiveTarget = updated.awakeTarget == null ? data.settings.awakeTarget : updated.awakeTarget;
+      if (effectiveTarget >= effectiveLimit) { error.textContent = 'Keep fewer tabs awake than the limit.'; error.hidden = false; more.open = true; target.focus(); return; }
+      var payload = { name: name.value.trim(), color: swatches.querySelector('input:checked').value, policy: updated };
+      if (workspace) payload.id = workspace.id;
+      var result = await operation(workspace ? 'workspace.update' : 'workspace.create', payload, save);
+      if (!result) return;
+      editing = null;
+      showResult(workspace ? 'Saved ' + payload.name + '.' : 'Created ' + payload.name + '. Select tabs on the Tabs page and choose Move to → ' + payload.name + ' to add them.');
+      render();
+    });
+    return form;
+  }
+  function renderWorkspaces() {
+    contentKey = 'workspaces';
+    $('view-actions').replaceChildren(button('New workspace', function() { editing = 'new'; renderWorkspaces(); var input = content.querySelector('.panel input'); if (input) input.focus(); }, { class: 'primary' }));
+    var children = [];
+    if (editing === 'new') children.push(workspaceEditor(null));
+    if (!data.workspaces.length && editing !== 'new') children.push(empty('No workspaces yet', 'A workspace is a named set of tabs, like “Work” or “Trip planning”, that you can put to sleep and wake together. On the Tabs page, select some tabs and choose Move to → New workspace.'));
+    var list = n('ul', { class: 'record-list' });
+    data.workspaces.forEach(function(workspace) {
+      if (editing === workspace.id) { list.appendChild(n('li', {}, [workspaceEditor(workspace)])); return; }
+      var current = data.currentWorkspaceId === workspace.id;
+      var open = data.tabs.filter(function(row) { return row.workspaceId === workspace.id; });
+      var status = current ? 'Current' : workspace.hibernated || (open.length && open.every(function(row) { return row.asleep; })) ? 'Asleep' : open.length ? 'Awake' : 'Not open';
+      list.appendChild(n('li', { class: 'record' }, [
+        n('div', { class: 'record-heading' }, [n('h2', {}, [dot(workspace.color), workspace.name]), n('span', { class: 'state ' + (status === 'Asleep' ? 'asleep' : status === 'Not open' ? 'loading' : 'awake'), text: status })]),
+        n('p', { class: 'record-meta', text: workspaceSummary(workspace) }),
+        n('div', { class: 'button-row' }, workspaceButtons(workspace, false))
+      ]));
+    });
+    if (data.workspaces.length) children.push(list);
+    content.replaceChildren.apply(content, children);
+    updateBusy();
+  }
+
+  /* ---------- Snapshots ---------- */
+  function tabsDetails(entries) {
+    var detail = n('details', {}, [n('summary', { text: 'Show ' + plural(entries.length, 'tab') })]);
     detail.addEventListener('toggle', function() {
       if (!detail.open || detail.children.length > 1) return;
-      detail.appendChild(n('ul', { class: 'record-tabs' }, rows.map(function(row) { return n('li', { text: tabTitle(row) + ' — ' + (row.originalUrl || row.url) }); })));
+      detail.appendChild(n('ul', { class: 'record-tabs' }, entries.map(function(entry) { return n('li', { text: tabTitle(entry) + ' — ' + site(entry.originalUrl || entry.url) }); })));
     });
     return detail;
   }
-  function buildSnooze() {
-    var choice = C.select([['30', '30 minutes'], ['60', '1 hour'], ['240', '4 hours'], ['tomorrow', 'Tomorrow at 09:00 (local)'], ['restart', 'Until browser restart'], ['custom', 'Choose a time']], '60', { 'data-focus-key': 'snooze-duration' });
-    var time = n('input', { type: 'datetime-local', 'data-focus-key': 'snooze-time' });
-    var timeField = C.field('Snooze until', time); timeField.hidden = true;
-    choice.addEventListener('change', function() { timeField.hidden = choice.value !== 'custom'; });
-    return details('Snooze suspension', [C.field('Keep selected tabs awake for', choice), timeField, n('div', { class: 'button-row' }, [b('Snooze', function(event) {
-      var payload = { tabIds: idsForAction() };
-      if (['tomorrow', 'restart'].includes(choice.value)) payload.mode = choice.value;
-      else if (choice.value === 'custom') { payload.until = new Date(time.value).getTime(); if (!Number.isFinite(payload.until) || payload.until <= Date.now()) return say('Choose a snooze time in the future.', 'error'); }
-      else payload.minutes = Number(choice.value);
-      operation('snooze.set', payload, event.currentTarget, 'Snooze saved.');
-    }), b('End snooze', function(event) { operation('snooze.clear', { tabIds: idsForAction() }, event.currentTarget, 'Snooze ended.'); })])]);
-  }
-  function buildProtection() {
-    var kind = C.select([['meeting', 'Meeting'], ['presentation', 'Presentation']], 'meeting', { 'data-focus-key': 'protection-kind' });
-    var duration = C.select([['60', '1 hour'], ['120', '2 hours'], ['restart', 'Until browser restart'], ['manual', 'Until I end it']], '60', { 'data-focus-key': 'protection-duration' });
-    return details('Meeting & presentation', [C.field('Protection mode', kind), C.field('Duration', duration), n('div', { class: 'button-row' }, [b('Protect tabs', function(event) {
-      var payload = { tabIds: idsForAction(), kind: kind.value };
-      if (duration.value === 'restart') payload.mode = 'restart'; else if (duration.value !== 'manual') payload.minutes = Number(duration.value);
-      operation('protection.set', payload, event.currentTarget, 'Protection enabled.');
-    }), b('End protection', function(event) { operation('protection.clear', { tabIds: idsForAction() }, event.currentTarget, 'Protection ended.'); })])]);
-  }
-  function buildAssignment() {
-    var select = C.select([['', 'Choose a workspace']].concat(data.workspaces.map(function(workspace) { return [workspace.id, workspace.name]; })), '', { 'data-focus-key': 'assign-workspace' });
-    var assign = b('Assign tabs', function(event) { if (!select.value) return say('Choose a workspace first.', 'error'); operation('workspace.assign', { id: select.value, tabIds: idsForAction() }, event.currentTarget, 'Tabs assigned.'); });
-    return details('Workspace', [C.field('Move selected tabs into', select), assign, n('p', { class: 'muted', text: 'Create or edit workspace rules in the Workspaces view.' })]);
-  }
-  function buildGrouping() {
-    var mode = C.select([['domain', 'Website / domain'], ['topic', 'Topic from local title keywords']], 'domain', { 'data-focus-key': 'group-mode' });
-    return details('Native tab groups', [C.field('Group selected tabs by', mode), b('Preview groups', function(event) { previewGroups(idsForAction(), mode.value, event.currentTarget); }, { 'data-focus-key': 'preview-groups' }), n('p', { class: 'muted', text: 'Topic grouping uses deterministic title keywords on this device. No cloud or AI service.' })]);
-  }
-  function buildExpiry() {
-    var time = n('input', { type: 'datetime-local', 'data-focus-key': 'expiry-time' });
-    var rows = activeRows();
-    var groupIds = Array.from(new Set(rows.map(function(row) { return row.groupId; }))).filter(function(id) { return id >= 0; });
-    var scope = C.select([['tab', 'Selected tabs']].concat(groupIds.length === 1 && rows.every(function(row) { return row.groupId === groupIds[0]; }) ? [['group', 'Entire native group, including future tabs']] : []), 'tab', { 'data-focus-key': 'expiry-scope' });
-    return details('Temporary tabs & groups', [C.field('Expiry scope', scope), C.field('Close safely after', time, 'Checked each minute. Draft, pinned, audio, meeting and snooze protections still apply.'), n('div', { class: 'button-row' }, [b('Set expiry', function(event) {
-      var until = new Date(time.value).getTime(); if (!Number.isFinite(until) || until <= Date.now()) return say('Choose an expiry time in the future.', 'error');
-      var payload = { tabIds: idsForAction(), until: until };
-      if (scope.value === 'group') payload.groupId = groupIds[0];
-      operation('temporary.set', payload, event.currentTarget, 'Expiry saved.');
-    }), b('Remove expiry', function(event) { operation('temporary.clear', { tabIds: idsForAction(), scope: scope.value, groupId: scope.value === 'group' ? groupIds[0] : undefined }, event.currentTarget, 'Expiry removed.'); })])]);
-  }
-  function skipList(skipped) {
-    var list = n('ul', { class: 'reason-list' });
-    (skipped || []).forEach(function(row) { list.appendChild(n('li', {}, [n('strong', { text: tabTitle(row) }), n('span', { text: (row.reasons || [row.reason || 'Unavailable']).join(', ') })])); });
-    return list;
-  }
-  async function previewAction(action, ids, options, trigger) {
-    if (!ids.length) return say('Select at least one tab.', 'error');
-    if (busy) return say('Wait for the current action to finish.');
-    trigger.disabled = true;
-    var version = ++previewVersion, selectionKey = inspectorKey;
-    previewBox.className = 'preview-panel'; previewBox.hidden = false; previewBox.setAttribute('aria-busy', 'true');
-    previewBox.replaceChildren(n('h3', { text: 'Checking tab protection' }), n('p', { text: 'Waiting for the browser to verify current page and draft state.' }));
-    try {
-      var preview = await C.request('action.preview', { action: action, tabIds: ids, options: options });
-      if (version !== previewVersion || selectionKey !== inspectorKey) return;
-      var eligible = preview.eligible || [], skipped = preview.skipped || [];
-      previewTrigger = trigger;
-      options.expectedTabs = eligible.concat(skipped).map(function(row) { return { id: row.id, uid: row.uid, originalUrl: row.originalUrl }; });
-      previewBox.replaceChildren(); previewBox.hidden = false; previewBox.className = 'preview-panel';
-      var verb = action.charAt(0).toUpperCase() + action.slice(1);
-      previewBox.append(n('h3', { text: verb + ' preview' }), n('p', { text: eligible.length + ' eligible; ' + skipped.length + ' skipped. Protection is checked again when the action runs.' }));
-      var eligibleDetails = details('Eligible tabs (' + eligible.length + ')', [n('ul', { class: 'record-tabs' }, eligible.map(function(row) { return n('li', { text: tabTitle(row) }); }))]);
-      previewBox.append(eligibleDetails);
-      if (skipped.length) previewBox.appendChild(skipList(skipped));
-      previewBox.appendChild(b(verb + ' ' + eligible.length + ' tabs', async function(event) {
-        var runButton = event.currentTarget;
-        if (['archive', 'close'].includes(action)) {
-          var accepted = await C.confirm({ title: verb + ' selected tabs?', text: 'Only tabs still eligible will change. Undo can restore URLs, order, groups and suspension state, but not unsaved application state.', accept: verb + ' tabs', destructive: true });
-          if (!accepted) return;
-        }
-        var result = await operation('action.run', { action: action, tabIds: ids, options: Object.assign({ reason: 'workbench' }, options) }, runButton, verb + ' completed.');
-        if (result && previewBox.isConnected) previewBox.hidden = true;
-      }, { class: ['archive', 'close'].includes(action) ? 'danger' : 'primary', disabled: !eligible.length, 'data-focus-key': 'run-preview' }));
-      previewBox.appendChild(b('Cancel preview', function() { previewBox.hidden = true; restoreTrigger(trigger); }, { class: 'quiet' }));
-    } catch (error) { failed(error); if (version === previewVersion) previewBox.replaceChildren(n('p', { class: 'error-text', text: 'Preview unavailable: ' + (error.message || String(error)) })); }
-    finally { previewBox.setAttribute('aria-busy', 'false'); if (trigger.isConnected) trigger.disabled = false; }
-  }
-  async function previewGroups(ids, mode, trigger) {
-    if (!ids.length) return say('Select at least one tab.', 'error');
-    trigger.disabled = true;
-    var version = ++previewVersion, selectionKey = inspectorKey;
-    previewBox.className = 'preview-panel'; previewBox.hidden = false; previewBox.setAttribute('aria-busy', 'true');
-    previewBox.replaceChildren(n('h3', { text: 'Planning native groups' }), n('p', { text: 'Reading the selected browser tabs.' }));
-    try {
-      var plan = await C.request('group.preview', { tabIds: ids, mode: mode });
-      if (version !== previewVersion || selectionKey !== inspectorKey) return;
-      previewTrigger = trigger;
-      previewBox.replaceChildren(n('h3', { text: 'Group preview' }), n('p', { text: mode === 'topic' ? 'Topic names come from local title keywords.' : 'Each website is grouped within its existing browser window.' }));
-      previewBox.className = 'preview-panel'; previewBox.hidden = false;
-      var groups = plan.groups || [];
-      previewBox.appendChild(n('ul', { class: 'reason-list' }, groups.map(function(group) { return n('li', { text: group.title + ': ' + group.tabIds.length + ' tabs' }); })));
-      if ((plan.skipped || []).length) previewBox.appendChild(skipList(plan.skipped));
-      previewBox.appendChild(b('Apply ' + groups.length + ' groups', function(event) { operation('group.apply', { tabIds: ids, mode: mode }, event.currentTarget, 'Native groups created.'); }, { class: 'primary', disabled: !groups.length, 'data-focus-key': 'apply-preview-groups' }));
-      previewBox.appendChild(b('Cancel preview', function() { previewBox.hidden = true; restoreTrigger(trigger); }, { class: 'quiet', 'data-focus-key': 'cancel-preview-groups' }));
-    } catch (error) { failed(error); if (version === previewVersion) previewBox.replaceChildren(n('p', { class: 'error-text', text: 'Group preview unavailable: ' + (error.message || String(error)) })); }
-    finally { previewBox.setAttribute('aria-busy', 'false'); if (trigger.isConnected) trigger.disabled = false; }
-  }
-  function replaceView(key, children) {
-    if (currentContent !== key) { content.replaceChildren(); currentContent = key; }
-    content.replaceChildren.apply(content, children);
-  }
-  function renderDuplicates() {
-    var groups = (data.duplicates || []).filter(function(group) {
-      if (route.workspace && group.workspaceId !== route.workspace) return false;
-      return !route.query || [group.url].concat(group.tabs.map(tabTitle)).join(' ').toLocaleLowerCase().includes(route.query.toLocaleLowerCase());
-    });
-    var list = n('ul', { class: 'record-list' });
-    groups.forEach(function(group, index) {
-      var key = group.workspaceId + '|' + group.url;
-      var survivor = duplicateChoices.get(key) || group.recommendedSurvivorId;
-      if (!group.tabs.some(function(row) { return row.id === survivor; })) survivor = group.recommendedSurvivorId || group.tabs[0].id;
-      duplicateChoices.set(key, survivor);
-      var item = n('li', { class: 'record', 'data-record-key': 'duplicates-' + key });
-      item.append(n('h2', { text: group.tabs.length + ' copies' }), n('p', { class: 'record-url', text: group.url }), n('p', { class: 'muted', text: workspaceName(group.workspaceId) + '. Choose the copy to keep; protected copies are never closed.' }));
-      group.tabs.forEach(function(row) {
-        var input = n('input', { type: 'radio', name: 'duplicate-' + index, value: row.id, checked: survivor === row.id, 'data-focus-key': 'duplicate-' + row.id });
-        input.addEventListener('change', function() { duplicateChoices.set(key, row.id); });
-        item.appendChild(n('label', { class: 'duplicate-choice' }, [input, n('span', { text: tabTitle(row) }, [n('small', { text: 'Window ' + (Number(row.windowOrdinal) + 1) + '; ' + row.status + (row.active ? '; active' : '') + ((row.protectionReasons || []).length ? '; ' + row.protectionReasons.join(', ') : '') })])]));
-      });
-      item.appendChild(b('Preview merge', async function(event) {
-        var trigger = event.currentTarget;
-        var keep = duplicateChoices.get(key);
-        var closeIds = group.tabs.filter(function(row) { return row.id !== keep; }).map(function(row) { return row.id; });
-        try {
-          var preview = await C.request('action.preview', { action: 'close', tabIds: closeIds });
-          var detail = n('div', {}, [n('p', { text: (preview.eligible || []).length + ' copies can close; ' + (preview.skipped || []).length + ' protected copies will stay open.' }), skipList(preview.skipped)]);
-          if (!await C.confirm({ title: 'Merge these duplicates?', text: 'The chosen survivor stays open. Exact URLs and workspace boundaries are preserved. Undo cannot recover unsaved application state.', detail: detail, accept: 'Merge duplicates', destructive: true })) return;
-          operation('duplicates.merge', { groups: [{ survivorId: keep, tabIds: group.tabs.map(function(row) { return row.id; }) }] }, trigger, 'Duplicates merged.');
-        } catch (error) { failed(error); }
-      }, { 'data-focus-key': 'merge-' + index }));
-      list.appendChild(item);
-    });
-    replaceView('duplicates', [groups.length ? list : empty('No exact duplicates', 'Distinct query strings, fragments and workspaces are intentionally kept separate.')]);
-  }
-  function buildWorkspaceEditor(workspace, trigger) {
-    var editor = n('section', { class: 'editor-panel', 'data-record-key': 'workspace-editor-' + (workspace ? workspace.id : 'new'), 'aria-label': workspace ? 'Edit workspace' : 'Create workspace' });
-    editor._trigger = trigger;
-    var form = n('form');
-    var name = n('input', { type: 'text', required: '', maxlength: '100', value: workspace ? workspace.name : '', 'data-focus-key': 'workspace-name' });
-    var color = C.select(nativeColors.map(function(value) { return [value, value.charAt(0).toUpperCase() + value.slice(1)]; }), workspace ? workspace.color : 'blue', { 'data-focus-key': 'workspace-color' });
-    var policy = workspace && workspace.policy || {};
-    var legacy = data.legacySettings || {};
-    var minutes = n('input', { type: 'number', min: '0', step: '0.01', value: policy.suspendMinutes == null ? '' : policy.suspendMinutes, placeholder: 'Global: ' + legacy.gsTimeToSuspend + ' min', 'data-focus-key': 'workspace-minutes' });
-    var policyInputs = {};
-    var grid = n('div', { class: 'form-grid' }, [C.field('Workspace name', name), C.field('Color', color), C.field('Suspend after inactivity (minutes)', minutes, 'Leave empty to inherit global settings. 0 means never.')]);
-    [['ignorePinned', 'Pinned tab protection'], ['ignoreAudio', 'Audio tab protection'], ['ignoreForms', 'Form-input protection'], ['ignoreActive', 'Active-tab protection'], ['countEnabled', 'Awake-tab count policy']].forEach(function(pair) {
-      var select = C.select([['inherit', 'Inherit global setting'], ['true', 'Enabled'], ['false', 'Disabled']], policy[pair[0]] == null ? 'inherit' : String(policy[pair[0]]), { 'data-focus-key': 'workspace-' + pair[0] });
-      policyInputs[pair[0]] = select;
-      grid.appendChild(C.field(pair[1], select));
-    });
-    var limit = n('input', { type: 'number', min: '1', step: '1', value: policy.awakeLimit == null ? '' : policy.awakeLimit, placeholder: 'Global: ' + data.settings.awakeLimit, 'data-focus-key': 'workspace-limit' });
-    var target = n('input', { type: 'number', min: '1', step: '1', value: policy.awakeTarget == null ? '' : policy.awakeTarget, placeholder: 'Global: ' + data.settings.awakeTarget, 'data-focus-key': 'workspace-target' });
-    grid.append(C.field('Suspend when awake count exceeds', limit), C.field('Suspend down to awake count', target));
-    var save = n('button', { type: 'submit', class: 'primary', text: workspace ? 'Save workspace' : 'Create workspace' });
-    form.append(grid, n('p', { class: 'muted', text: 'Explicit bulk actions always retain draft, audio, meeting and snooze safeguards.' }), n('div', { class: 'button-row' }, [save, b('Cancel', function() { closeInlinePanel(editor); })]));
+  function renderSnapshots() {
+    contentKey = 'snapshots';
+    var settings = data.settings;
+    var label = n('input', { type: 'text', maxlength: '100', placeholder: 'Name (optional)', 'aria-label': 'Snapshot name' });
+    var saveButton = n('button', { type: 'submit', class: 'primary', text: 'Save snapshot now', 'data-busy-sensitive': '' });
+    var form = n('form', { class: 'panel' }, [n('div', { class: 'inline-form' }, [label, saveButton]), n('p', { class: 'muted form-note' }, [settings.snapshotEnabled ?
+      'Automatic snapshots are on: every ' + timerLabel(settings.snapshotIntervalMinutes) + ', keeping the last ' + settings.snapshotKeep + '. ' :
+      'Automatic snapshots are off. ', n('a', { href: 'options.html#snapshots', text: settings.snapshotEnabled ? 'Change' : 'Turn on' })])]);
     form.addEventListener('submit', async function(event) {
       event.preventDefault();
-      if (!name.value.trim()) return say('Enter a workspace name.', 'error');
-      var updatedPolicy = { suspendMinutes: minutes.value === '' ? null : Number(minutes.value), awakeLimit: limit.value === '' ? null : Number(limit.value), awakeTarget: target.value === '' ? null : Number(target.value) };
-      Object.keys(policyInputs).forEach(function(key) { updatedPolicy[key] = policyInputs[key].value === 'inherit' ? null : policyInputs[key].value === 'true'; });
-      var effectiveLimit = updatedPolicy.awakeLimit == null ? data.settings.awakeLimit : updatedPolicy.awakeLimit;
-      var effectiveTarget = updatedPolicy.awakeTarget == null ? data.settings.awakeTarget : updatedPolicy.awakeTarget;
-      if (effectiveTarget >= effectiveLimit) { target.focus(); return say('The awake target must be lower than the awake limit.', 'error'); }
-      var payload = { name: name.value.trim(), color: color.value, policy: updatedPolicy };
-      if (workspace) payload.id = workspace.id;
-      var result = await operation(workspace ? 'workspace.update' : 'workspace.create', payload, save, workspace ? 'Workspace saved.' : 'Workspace created.');
-      if (result) closeInlinePanel(editor);
+      var result = await operation('snapshot.create', { label: label.value.trim() }, saveButton);
+      if (result) showResult('Saved “' + result.label + '” with ' + plural(result.tabs.length, 'tab') + '.');
     });
-    editor.append(n('h2', { text: workspace ? 'Edit ' + workspace.name : 'Create a workspace' }), form);
-    return editor;
-  }
-  function renderWorkspaces() {
-    var isExisting = currentContent === 'workspaces';
-    if (!isExisting) { workspaceEditor = null; bookmarkPanel = null; transitionPanel = null; content.replaceChildren(); currentContent = 'workspaces'; }
-    var toolbar = n('div', { class: 'button-row' }, [b('Create workspace', function(event) { workspaceEditor = buildWorkspaceEditor(null, event.currentTarget); renderWorkspaces(); workspaceEditor.querySelector('input').focus(); }, { class: 'primary', 'data-focus-key': 'create-workspace' }), b('Import bookmarks', function(event) { openBookmarkPicker('import', null, event.currentTarget); }, { 'data-focus-key': 'import-bookmarks' })]);
-    var list = n('ul', { class: 'record-list content-section' });
-    data.workspaces.forEach(function(workspace) {
-      var live = data.tabs.filter(function(row) { return row.workspaceId === workspace.id; });
-      var item = n('li', { class: 'record', 'data-record-key': 'workspace-' + workspace.id });
-      item.append(n('div', { class: 'record-heading' }, [n('h2', { text: workspace.name }), n('span', { class: 'row-state', text: workspace.id === data.currentWorkspaceId ? 'Current' : workspace.hibernated ? 'Hibernated' : 'Available' })]), n('p', { class: 'muted', text: live.length + ' open tabs; ' + (workspace.savedTabs || []).length + ' saved entries. ' + (workspace.policy && workspace.policy.suspendMinutes != null ? 'Inactivity: ' + (workspace.policy.suspendMinutes === 0 ? 'never suspend' : workspace.policy.suspendMinutes + ' min') + '.' : 'Inherits global inactivity policy.') }));
-      item.appendChild(n('div', { class: 'button-row' }, [
-        b('View tabs', function() { navigate('tabs', workspace.id); }, { 'data-focus-key': 'workspace-view-' + workspace.id }),
-        b('Switch here', function(event) { workspaceTransition(workspace, 'switch', event.currentTarget); }, { class: 'primary', 'data-focus-key': 'workspace-switch-' + workspace.id }),
-        b('Hibernate', function(event) { workspaceTransition(workspace, 'hibernate', event.currentTarget); }, { 'data-focus-key': 'workspace-hibernate-' + workspace.id }),
-        b('Edit rules', function(event) { workspaceEditor = buildWorkspaceEditor(workspace, event.currentTarget); renderWorkspaces(); workspaceEditor.querySelector('input').focus(); }, { 'data-focus-key': 'workspace-edit-' + workspace.id }),
-        b('Export bookmarks', function(event) { openBookmarkPicker('export', workspace, event.currentTarget); }, { 'data-focus-key': 'workspace-export-' + workspace.id }),
-        b('Delete', function(event) { deleteWorkspace(workspace, event.currentTarget); }, { class: 'danger', 'data-focus-key': 'workspace-delete-' + workspace.id })
-      ]));
-      if (live.length) item.appendChild(savedTabsDetails(live, 'Open tabs'));
-      if ((workspace.savedTabs || []).length) item.appendChild(savedTabsDetails(workspace.savedTabs, 'Saved entries'));
-      list.appendChild(item);
-    });
-    content.replaceChildren(toolbar);
-    if (params.get('startup') === 'choose') content.appendChild(n('div', { class: 'notice', text: 'Choose a workspace for this browser session. “Switch here” restores it and safely hibernates eligible tabs in other workspaces. Protected work stays open.' }));
-    if (workspaceEditor) content.appendChild(workspaceEditor);
-    if (bookmarkPanel) content.appendChild(bookmarkPanel);
-    if (transitionPanel) content.appendChild(transitionPanel);
-    content.appendChild(data.workspaces.length ? list : empty('A workspace keeps a task together', 'Create one, then select tabs and use Workspace in the inspector to assign them. Or import a real bookmark folder.'));
-  }
-  async function workspaceTransition(workspace, type, trigger) {
-    var ids = type === 'hibernate' ? data.tabs.filter(function(row) { return row.workspaceId === workspace.id && !row.asleep; }).map(function(row) { return row.id; }) : data.tabs.filter(function(row) { return row.workspaceId && row.workspaceId !== workspace.id && !row.asleep; }).map(function(row) { return row.id; });
-    trigger.disabled = true;
-    try {
-      var preview = await C.request('action.preview', { action: 'suspend', tabIds: ids, options: { allowActive: true } });
-      var panel = n('section', { class: 'editor-panel' }, [n('h2', { text: type === 'hibernate' ? 'Hibernate ' + workspace.name : 'Switch to ' + workspace.name }), n('p', { text: (preview.eligible || []).length + ' tabs can sleep; ' + (preview.skipped || []).length + ' protected tabs will stay awake.' }), skipList(preview.skipped), n('p', { class: 'muted', text: type === 'switch' ? 'This workspace will be restored with its tab organization. Unassigned tabs remain untouched.' : 'Tab URLs and organization stay saved in the workspace.' })]);
-      panel._trigger = trigger;
-      panel.appendChild(n('div', { class: 'button-row' }, [b(type === 'switch' ? 'Switch workspace' : 'Hibernate workspace', async function(event) {
-        var result = await operation('workspace.' + type, { id: workspace.id }, event.currentTarget, 'Workspace ' + (type === 'switch' ? 'switched.' : 'hibernated.'));
-        if (result) { C.renderResult(panel, result, 'Workspace updated.'); panel.appendChild(b('Dismiss', function() { closeInlinePanel(panel); })); }
-      }, { class: 'primary' }), b('Cancel', function() { closeInlinePanel(panel); })]));
-      transitionPanel = panel; renderWorkspaces();
-    } catch (error) { failed(error); }
-    finally { if (trigger.isConnected) trigger.disabled = false; }
-  }
-  async function deleteWorkspace(workspace, trigger) {
-    var targets = [['unassigned', 'Unassigned (closed entries go to Archive)']].concat(data.workspaces.filter(function(item) { return item.id !== workspace.id; }).map(function(item) { return [item.id, item.name]; }));
-    var reassign = C.select(targets, 'unassigned');
-    if (!await C.confirm({ title: 'Delete ' + workspace.name + '?', text: 'Open tabs stay open. Choose where to move this workspace’s open and saved tabs.', detail: C.field('Reassign members to', reassign), accept: 'Delete workspace', destructive: true })) return;
-    operation('workspace.delete', { id: workspace.id, reassignToId: reassign.value === 'unassigned' ? null : reassign.value }, trigger, 'Workspace deleted; tabs reassigned.');
-  }
-  function folderOptions(tree) {
-    var folders = [];
-    function visit(node, path) {
-      if (node.url) return;
-      var title = node.title || (node.id === '0' ? 'Bookmarks' : 'Untitled folder');
-      var next = path.concat(title);
-      if (node.id !== '0') folders.push([node.id, next.join(' / ')]);
-      (node.children || []).forEach(function(child) { visit(child, next); });
-    }
-    tree.forEach(function(root) { visit(root, []); });
-    return folders;
-  }
-  async function openBookmarkPicker(mode, workspace, trigger) {
-    trigger.disabled = true;
-    try {
-      var response = await C.request('bookmarks.tree');
-      var tree = Array.isArray(response) ? response : response.tree;
-      if (!Array.isArray(tree)) throw new Error('The browser returned no bookmark tree.');
-      var options = folderOptions(tree);
-      if (!options.length) throw new Error('No bookmark folders are available. Create a folder in the browser’s bookmark manager first.');
-      var folder = C.select(options, options[0][0], { 'data-focus-key': 'bookmark-folder' });
-      var name = n('input', { type: 'text', required: '', maxlength: '100', value: workspace ? workspace.name : '', 'data-focus-key': 'bookmark-name' });
-      var form = n('form');
-      var submit = n('button', { type: 'submit', class: 'primary', text: mode === 'import' ? 'Import folder' : 'Export workspace' });
-      form.append(C.field(mode === 'import' ? 'Bookmark folder to import' : 'Destination bookmark folder', folder), C.field(mode === 'import' ? 'New workspace name' : 'New bookmark folder name', name), n('p', { class: 'muted', text: mode === 'import' ? 'Imports real bookmark URLs into a new workspace and keeps nested folder grouping. It does not delete bookmarks.' : 'Creates a real folder inside the chosen destination. Existing bookmarks stay untouched.' }), n('div', { class: 'button-row' }, [submit, b('Cancel', function() { closeInlinePanel(panel); })]));
-      form.addEventListener('submit', async function(event) {
-        event.preventDefault();
-        var payload = mode === 'import' ? { folderId: folder.value, name: name.value.trim() } : { id: workspace.id, parentId: folder.value, name: name.value.trim() };
-        var result = await operation('bookmarks.' + mode, payload, submit, 'Bookmarks ' + (mode === 'import' ? 'imported.' : 'exported.'));
-        if (result) {
-          C.renderResult(bookmarkPanel, result, mode === 'import' ? result.imported + ' bookmark tabs imported.' : result.created + ' bookmarks exported.');
-          bookmarkPanel.appendChild(b('Done', function() { closeInlinePanel(panel); }));
-        }
-      });
-      var panel = n('section', { class: 'editor-panel', 'data-record-key': 'bookmarks-' + mode + '-' + (workspace ? workspace.id : 'new') }, [n('h2', { text: mode === 'import' ? 'Import bookmark folder' : 'Export ' + workspace.name }), form]);
-      panel._trigger = trigger;
-      bookmarkPanel = panel;
-      renderWorkspaces(); folder.focus();
-    } catch (error) { failed(error); }
-    finally { if (trigger.isConnected) trigger.disabled = false; }
-  }
-  function renderArchive() {
-    var list = n('ul', { class: 'record-list' });
-    (data.archive || []).slice().reverse().forEach(function(entry) {
-      var item = n('li', { class: 'record', 'data-record-key': 'archive-' + entry.id });
-      item.append(n('h2', { text: entry.label || 'Archived tabs' }), n('p', { class: 'muted', text: C.date(entry.createdAt) + '; ' + entry.tabs.length + ' tabs' + (entry.reason ? '; ' + entry.reason : '') }), savedTabsDetails(entry.tabs), n('div', { class: 'button-row' }, [b('Restore archive', function(event) { operation('archive.restore', { id: entry.id }, event.currentTarget, 'Archive restored.'); }, { class: 'primary', 'data-focus-key': 'archive-restore-' + entry.id }), b('Delete saved archive', async function(event) {
-        var trigger = event.currentTarget;
-        if (await C.confirm({ title: 'Delete saved archive?', text: 'This removes the locally saved URLs. It does not close open tabs and cannot be undone.', accept: 'Delete archive', destructive: true })) operation('archive.delete', { id: entry.id }, trigger, 'Saved archive deleted.');
-      }, { class: 'danger', 'data-focus-key': 'archive-delete-' + entry.id })]));
-      list.appendChild(item);
-    });
-    replaceView('archive', [(data.archive || []).length ? list : empty('Your archive is empty', 'Select tabs in any review queue, then preview Archive in the inspector. Protected work stays open.')]);
-  }
-  function snapshotValue(row, field) {
-    if (!row) return 'Not present';
-    if (field === 'status') return row.status || (row.asleep ? 'Suspended' : 'Awake');
-    if (field === 'url' || field === 'originalUrl') return row.originalUrl || row.url;
-    if (field === 'window') return Number.isInteger(row.windowOrdinal) ? 'Window ' + (row.windowOrdinal + 1) : 'Browser window ' + row.windowId;
-    if (field === 'index') return Number(row.index) + 1;
-    if (field === 'workspace') {
-      var id = row.workspaceId || row.meta && row.meta.workspaceId;
-      var workspace = data.workspaces.find(function(item) { return item.id === id; });
-      return workspace ? workspace.name : id ? row.workspaceName || 'Workspace ' + id : 'Unassigned';
-    }
-    if (field === 'snooze' || field === 'protection') {
-      var protection = row.meta && row.meta[field] || row[field];
-      return protection ? (protection.kind ? protection.kind + ': ' : '') + C.expiry(protection) : 'None';
-    }
-    var value = field === 'expiresAt' ? row.meta && row.meta.expiresAt || row.expiresAt : field.split('.').reduce(function(current, key) { return current && current[key]; }, row);
-    if (value === null || value === undefined) return 'None';
-    if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-    if (/At$/.test(field) && typeof value === 'number') return C.date(value);
-    return typeof value === 'object' ? JSON.stringify(value) : String(value);
-  }
-  function renderSnapshots() {
-    var wasSnapshots = currentContent === 'snapshots';
-    if (!wasSnapshots) { comparePanel = null; content.replaceChildren(); currentContent = 'snapshots'; }
-    var label = n('input', { type: 'text', maxlength: '100', placeholder: 'Optional snapshot name', 'data-focus-key': 'snapshot-label' });
-    var oldLabel = content.querySelector('[data-focus-key="snapshot-label"]'); if (oldLabel) label.value = oldLabel.value;
-    var create = b('Save snapshot', function(event) { operation('snapshot.create', { label: label.value.trim() }, event.currentTarget, 'Snapshot saved locally.'); }, { class: 'primary', 'data-focus-key': 'snapshot-create' });
-    var createForm = n('div', { class: 'form-grid' }, [C.field('Save your current browser session', label), n('div', { class: 'button-row' }, [create, n('a', { href: 'options.html#snapshots', text: 'Scheduled snapshots' })])]);
     var snapshots = (data.snapshots || []).slice().sort(function(a, b) { return b.createdAt - a.createdAt; });
-    var list = n('ul', { class: 'record-list content-section' });
-    snapshots.forEach(function(snapshot) {
-      var item = n('li', { class: 'record', 'data-record-key': 'snapshot-' + snapshot.id });
-      item.append(n('h2', { text: snapshot.label || 'Browser snapshot' }), n('p', { class: 'muted', text: C.date(snapshot.createdAt) + '; ' + snapshot.tabs.length + ' tabs; ' + snapshot.reason }), savedTabsDetails(snapshot.tabs), n('div', { class: 'button-row' }, [
-        b('Restore saved state', function(event) { restoreSnapshot(snapshot, undefined, event.currentTarget); }, { 'data-focus-key': 'snapshot-restore-' + snapshot.id }),
-        b('Restore asleep', function(event) { restoreSnapshot(snapshot, true, event.currentTarget); }, { 'data-focus-key': 'snapshot-asleep-' + snapshot.id }),
-        b('Restore awake', function(event) { restoreSnapshot(snapshot, false, event.currentTarget); }, { 'data-focus-key': 'snapshot-awake-' + snapshot.id }),
-        b('Delete', async function(event) {
-          var trigger = event.currentTarget;
-          if (await C.confirm({ title: 'Delete snapshot?', text: 'This removes the saved snapshot, not your current tabs. Deletion cannot be undone.', accept: 'Delete snapshot', destructive: true })) operation('snapshot.delete', { id: snapshot.id }, trigger, 'Snapshot deleted.');
-        }, { class: 'danger', 'data-focus-key': 'snapshot-delete-' + snapshot.id })
-      ]));
-      list.appendChild(item);
-    });
-    content.replaceChildren(createForm);
-    if (snapshots.length >= 2) {
-      var options = snapshots.map(function(snapshot) { return [snapshot.id, (snapshot.label || 'Snapshot') + ' (' + C.date(snapshot.createdAt) + ')']; });
-      if (!snapshots.some(function(snapshot) { return snapshot.id === snapshotSelection.before; })) snapshotSelection.before = snapshots[1].id;
-      if (!snapshots.some(function(snapshot) { return snapshot.id === snapshotSelection.after; })) snapshotSelection.after = snapshots[0].id;
-      var before = C.select(options, snapshotSelection.before, { 'data-focus-key': 'compare-before' }), after = C.select(options, snapshotSelection.after, { 'data-focus-key': 'compare-after' });
-      before.addEventListener('change', function() { snapshotSelection.before = before.value; }); after.addEventListener('change', function() { snapshotSelection.after = after.value; });
-      content.appendChild(n('section', { class: 'content-section' }, [n('h2', { text: 'Compare snapshots' }), n('div', { class: 'compare-controls' }, [C.field('Before', before), C.field('After', after), b('Compare', async function(event) {
-        if (before.value === after.value) return say('Choose two different snapshots.', 'error');
-        var trigger = event.currentTarget; trigger.disabled = true;
-        try {
-          var diff = await C.request('snapshot.compare', { beforeId: before.value, afterId: after.value });
-          comparePanel = n('section', { class: 'editor-panel' }, [n('h2', { text: 'Snapshot comparison' }), n('p', { text: diff.added.length + ' added; ' + diff.removed.length + ' removed; ' + diff.changed.length + ' changed; ' + diff.unchangedCount + ' unchanged.' })]);
-          comparePanel._trigger = trigger;
-          [['Added', diff.added], ['Removed', diff.removed]].forEach(function(pair) { if (pair[1].length) comparePanel.appendChild(details(pair[0], [n('ul', { class: 'record-tabs' }, pair[1].map(function(row) { return n('li', { text: tabTitle(row) + ' — ' + (row.originalUrl || row.url) }); }))])); });
-          if (diff.changed.length) comparePanel.appendChild(details('Changed', [n('ul', { class: 'record-tabs' }, diff.changed.map(function(change) {
-            return n('li', {}, [n('strong', { text: tabTitle(change.after || change.before) }), n('ul', {}, (change.fields || []).map(function(field) { return n('li', { text: field + ': ' + snapshotValue(change.before, field) + ' → ' + snapshotValue(change.after, field) }); }))]);
-          }))]));
-          comparePanel.appendChild(b('Dismiss', function() { closeInlinePanel(comparePanel); }, { 'data-focus-key': 'dismiss-snapshot-comparison' }));
-          preserveFocus(renderSnapshots);
-        } catch (error) { failed(error); }
-        finally { if (trigger.isConnected) trigger.disabled = false; if (document.activeElement === document.body) restoreTrigger(trigger); }
-      }, { 'data-focus-key': 'compare-snapshots' })]) ]));
+    var children = [form];
+    if (!snapshots.length) {
+      children.push(empty('No snapshots yet', 'A snapshot saves the list of tabs you have open right now, so you can reopen them later.'));
+      return content.replaceChildren.apply(content, children);
     }
-    if (comparePanel) content.appendChild(comparePanel);
-    content.appendChild(snapshots.length ? list : empty('No snapshots saved yet', 'Save your real current session above or enable a local snapshot schedule in Settings.'));
+    var list = n('ul', { class: 'record-list' });
+    snapshots.forEach(function(snapshot) {
+      list.appendChild(n('li', { class: 'record' }, [
+        n('div', { class: 'record-heading' }, [n('h2', { text: snapshot.label || 'Snapshot' })]),
+        n('p', { class: 'record-meta', text: when(snapshot.createdAt) + ' · ' + plural(snapshot.tabs.length, 'tab') + (snapshot.reason === 'scheduled' ? ' · automatic' : '') }),
+        n('div', { class: 'button-row' }, [
+          button('Reopen missing tabs', function(event) { restoreSnapshot(snapshot, event.currentTarget); }, { class: 'small primary', 'data-busy-sensitive': '', title: 'Reopen this snapshot’s tabs that aren’t open now. They open asleep.' }),
+          button('Delete', async function(event) {
+            var trigger = event.currentTarget;
+            if (!await C.confirm({ title: 'Delete this snapshot?', text: 'Only the saved list is deleted. Your open tabs don’t change.', accept: 'Delete snapshot', destructive: true })) return;
+            if (await operation('snapshot.delete', { id: snapshot.id }, trigger)) showResult('Snapshot deleted.');
+          }, { class: 'small danger', 'data-busy-sensitive': '' })
+        ]),
+        tabsDetails(snapshot.tabs)
+      ]));
+    });
+    children.push(list);
+    if (snapshots.length >= 2) children.push(compareSection(snapshots));
+    content.replaceChildren.apply(content, children);
+    updateBusy();
   }
-  async function restoreSnapshot(snapshot, asleep, trigger) {
-    var panel = n('section', { class: 'editor-panel' }, [n('h2', { text: 'Restore ' + (snapshot.label || 'snapshot') }), n('p', { text: snapshot.tabs.length + ' saved tabs will be matched or recreated, preserving unrelated open work. ' + (asleep === undefined ? 'Each tab keeps its saved suspension state.' : asleep ? 'Restored tabs will stay asleep.' : 'Restored tabs will be awake.') }), n('p', { class: 'muted', text: 'Restoration uses the throttle configured in Settings. It restores URLs and organization, not unsaved page state. Protected or changed pages are retained.' })]);
-    panel._trigger = trigger;
-    panel.appendChild(n('div', { class: 'button-row' }, [b('Restore snapshot', async function(event) {
-      var payload = { id: snapshot.id }; if (asleep !== undefined) payload.asleep = asleep;
-      var result = await operation('snapshot.restore', payload, event.currentTarget, 'Snapshot restored.');
-      if (result) { comparePanel = n('section', { class: 'editor-panel' }); comparePanel._trigger = trigger; C.renderResult(comparePanel, result, 'Snapshot restored.'); comparePanel.appendChild(b('Dismiss', function() { closeInlinePanel(comparePanel); })); renderSnapshots(); }
-    }, { class: 'primary' }), b('Cancel', function() { closeInlinePanel(panel); })]));
-    comparePanel = panel; renderSnapshots();
+  async function restoreSnapshot(snapshot, trigger) {
+    var result = await operation('snapshot.restore', { id: snapshot.id }, trigger);
+    if (!result) return;
+    var reopened = (result.created || []).length;
+    var text = reopened ? 'Reopened ' + plural(reopened, 'tab') + ' from “' + snapshot.label + '”. ' + (reopened === 1 ? 'It’s asleep until you open it.' : 'They’re asleep until you open them.') : 'All of this snapshot’s tabs are already open.';
+    if (result.alreadyOpen && reopened) text += ' ' + plural(result.alreadyOpen, 'tab') + ' were already open.';
+    showResult(text, { skipped: result.skipped, undo: reopened > 0 });
   }
-  function renderTimeline() {
-    var terms = route.query.toLocaleLowerCase();
-    var events = (data.timeline || []).slice().reverse().filter(function(event) { return !terms || [event.type, event.title, event.url, event.reason, workspaceName(event.workspaceId)].join(' ').toLocaleLowerCase().includes(terms); });
-    var table = n('table', { class: 'data-table' }, [n('thead', {}, [n('tr', {}, [n('th', { text: 'When' }), n('th', { text: 'Event / tab' }), n('th', { text: 'Reason' })])])]);
-    var body = n('tbody');
-    events.slice(0, timelineLimit).forEach(function(event) { body.appendChild(n('tr', {}, [n('td', { class: 'timeline-time', text: C.date(event.at) }), n('td', {}, [n('strong', { text: event.type }), n('div', { text: event.title || 'Browser operation' }), n('small', { text: event.url || '' })]), n('td', { text: event.reason || 'Browser activity' })])); });
-    table.appendChild(body);
-    var children = [n('p', { class: 'muted', text: Math.min(events.length, timelineLimit) + ' of ' + events.length + ' recorded events' }), events.length ? table : empty('No matching events', 'Lifecycle events are recorded locally as you use your browser. Clear search to see all recorded events.')];
-    if (events.length > timelineLimit) children.push(b('Show older events', function() { timelineLimit += 100; preserveFocus(renderTimeline); }, { 'data-focus-key': 'older-events' }));
-    replaceView('timeline', children);
-  }
-  function metricList(rows) { var list = n('dl', { class: 'metric-list' }); rows.forEach(function(row) { list.append(n('dt', { text: row[0] }), n('dd', { text: row[1] })); }); return list; }
-  function activityTable(rows, nameKey, valueKey) {
-    var table = n('table', { class: 'data-table' }, [n('thead', {}, [n('tr', {}, [n('th', { text: nameKey === 'domain' ? 'Website' : 'Workspace' }), n('th', { text: 'Foreground-active time' })])])]);
-    var body = n('tbody');
-    rows.forEach(function(row) { body.appendChild(n('tr', {}, [n('td', { text: nameKey === 'domain' ? row.domain : row.name || workspaceName(row.workspaceId) }), n('td', { text: C.duration(row[valueKey] || 0) })])); });
-    table.appendChild(body); return table;
-  }
-  function renderInsights() {
-    var metrics = data.metrics || {}, activity = metrics.activity || {}, memory = data.memory || {};
-    var latency = metrics.restoreAverageMs;
-    if (latency === undefined && metrics.restoreSamples) latency = metrics.restoreLatencyMs / metrics.restoreSamples;
-    var children = [n('h2', { text: 'Suspension policy' }), metricList([
-      ['Currently awake', data.tabs.filter(function(row) { return !row.asleep; }).length],
-      ['Currently suspended / discarded', data.tabs.filter(function(row) { return row.asleep; }).length],
-      ['Recorded suspensions', metrics.suspensions || 0], ['Recorded restorations', metrics.restorations || 0],
-      ['Time tabs spent asleep (combined)', C.duration(metrics.sleepMs || 0)],
-      ['Average measured restore latency', metrics.restoreSamples ? Math.round(latency) + ' ms (' + metrics.restoreSamples + ' samples)' : 'No completed restores yet'],
-      ['Recorded archives', metrics.archives || 0], ['Recorded closes', metrics.closes || 0],
-      ['Recorded protected-tab skips', metrics.protectionSkips || 0]
-    ]), n('p', { class: 'muted', text: 'Counts start when local recording begins. Combined sleep time can exceed wall-clock time because several tabs can sleep together. No RAM reduction is inferred.' })];
-    var reasons = Object.keys(metrics.protectionReasons || {});
-    var protectionSection = n('section', { class: 'content-section' }, [n('h2', { text: 'Why tabs were skipped' })]);
-    protectionSection.appendChild(reasons.length ? metricList(reasons.map(function(reason) { return [reason, metrics.protectionReasons[reason]]; })) : n('p', { class: 'muted', text: 'No protection skips have been recorded yet.' }));
-    children.push(protectionSection);
-    var activitySection = n('section', { class: 'content-section' }, [n('h2', { text: 'Foreground activity' }), n('p', { class: 'muted', text: 'Measured while a browser tab is active in the focused window and the browser is not idle. This is not inferred attention. Rolling ' + (activity.days || 90) + '-day local history.' })]);
-    if ((activity.byDomain || []).length) activitySection.append(n('h3', { text: 'By website' }), activityTable(activity.byDomain, 'domain', 'ms'));
-    if ((activity.byWorkspace || []).length) activitySection.append(n('h3', { text: 'By workspace' }), activityTable(activity.byWorkspace, 'name', 'ms'));
-    if (!(activity.byDomain || []).length && !(activity.byWorkspace || []).length) activitySection.appendChild(n('p', { class: 'muted', text: 'Foreground intervals will appear after you spend time in a normal browser tab.' }));
-    activitySection.appendChild(b('Refresh activity measurements', function(event) { operation('activity.get', {}, event.currentTarget, 'Activity measurements refreshed.'); }));
-    children.push(activitySection, n('section', { class: 'content-section' }, [n('h2', { text: 'Neglected review' }), n('p', { class: 'muted', text: (data.neglected || []).length + ' tabs have not been viewed for at least ' + data.settings.neglectedDays + ' days. Nothing is closed automatically.' }), b('Review neglected tabs', function() { navigate('neglected'); }), n('a', { class: 'button-link', href: 'options.html#review', text: 'Change review threshold' })]), n('section', { class: 'content-section' }, [n('h2', { text: 'Optional macOS memory pressure' }), n('p', { class: 'muted', text: 'Helper: ' + (memory.connected ? 'connected' : 'not connected') + '; pressure: ' + (memory.level || 'unknown') + (memory.checkedAt ? '; checked ' + C.date(memory.checkedAt) : '. Not checked yet.') }), n('a', { class: 'button-link', href: 'options.html#memory', text: 'Native helper settings & installation' })]));
-    replaceView('insights', children);
+  function compareSection(snapshots) {
+    var options = snapshots.map(function(snapshot) { return [snapshot.id, (snapshot.label || 'Snapshot') + ' — ' + when(snapshot.createdAt)]; });
+    if (!snapshots.some(function(item) { return item.id === compareState.before; })) compareState.before = snapshots[1].id;
+    if (!snapshots.some(function(item) { return item.id === compareState.after; })) compareState.after = snapshots[0].id;
+    var before = C.select(options, compareState.before), after = C.select(options, compareState.after);
+    before.addEventListener('change', function() { compareState.before = before.value; });
+    after.addEventListener('change', function() { compareState.after = after.value; });
+    var output = n('div');
+    var section = n('details', { class: 'panel' }, [n('summary', { text: 'Compare two snapshots' }), n('div', { class: 'form-grid' }, [C.field('Older', before), C.field('Newer', after)]), C.button('Compare', async function() {
+      if (before.value === after.value) { output.replaceChildren(n('p', { class: 'error-text', text: 'Choose two different snapshots.' })); return; }
+      try {
+        var diff = await C.request('snapshot.compare', { beforeId: before.value, afterId: after.value });
+        var parts = [n('p', { class: 'diff-summary', text: diff.added.length + ' added · ' + diff.removed.length + ' removed · ' + diff.changed.length + ' moved or changed · ' + diff.unchangedCount + ' unchanged' })];
+        [['Added', diff.added], ['Removed', diff.removed]].forEach(function(pair) {
+          if (pair[1].length) parts.push(n('h3', { text: pair[0] }), n('ul', { class: 'record-tabs' }, pair[1].map(function(entry) { return n('li', { text: tabTitle(entry) + ' — ' + site(entry.originalUrl || entry.url) }); })));
+        });
+        if (diff.changed.length) parts.push(n('h3', { text: 'Moved or changed' }), n('ul', { class: 'record-tabs' }, diff.changed.map(function(change) { return n('li', { text: tabTitle(change.after) + ' — ' + change.fields.join(', ') }); })));
+        output.replaceChildren.apply(output, parts);
+      } catch (error) { output.replaceChildren(n('p', { class: 'error-text', text: error.message })); }
+    }), output]);
+    section.open = !!output.children.length;
+    return section;
   }
 
-  search.value = route.query; statusFilter.value = route.status;
-  search.addEventListener('input', function() { route.query = search.value; saveRoute(); preserveFocus(render); });
-  statusFilter.addEventListener('change', function() { route.status = statusFilter.value; saveRoute(); render(); });
-  windowFilter.addEventListener('change', function() { route.window = windowFilter.value; saveRoute(); render(); });
-  document.getElementById('refresh-button').addEventListener('click', refresh);
-  undoButton.addEventListener('click', function(event) { operation('action.undo', {}, event.currentTarget, 'Last action undone. Unsaved application state is not restored.'); });
+  /* ---------- Archive ---------- */
+  function renderArchive() {
+    contentKey = 'archive';
+    var archives = (data.archive || []).slice().sort(function(a, b) { return b.createdAt - a.createdAt; });
+    if (!archives.length) return content.replaceChildren(empty('Nothing archived', 'Archiving closes tabs but keeps them here so you can bring them back. On the Tabs page, select tabs and choose Archive.'));
+    var list = n('ul', { class: 'record-list' });
+    archives.forEach(function(entry) {
+      list.appendChild(n('li', { class: 'record' }, [
+        n('div', { class: 'record-heading' }, [n('h2', { text: entry.label || 'Archived tabs' })]),
+        n('p', { class: 'record-meta', text: when(entry.createdAt) + ' · ' + plural(entry.tabs.length, 'tab') }),
+        n('div', { class: 'button-row' }, [
+          button('Restore', async function(event) {
+            var result = await operation('archive.restore', { id: entry.id }, event.currentTarget);
+            if (result) showResult('Restored ' + plural((result.restored || []).length, 'tab') + '.' + (result.remaining ? ' ' + plural(result.remaining, 'tab') + ' couldn’t be restored and stay in Archive.' : ''), { skipped: result.skipped, undo: (result.changed || []).length > 0 });
+          }, { class: 'small primary', 'data-busy-sensitive': '' }),
+          button('Delete', async function(event) {
+            var trigger = event.currentTarget;
+            if (!await C.confirm({ title: 'Delete this archive?', text: 'These saved tabs will be gone for good. This can’t be undone.', accept: 'Delete', destructive: true })) return;
+            if (await operation('archive.delete', { id: entry.id }, trigger)) showResult('Archive deleted.');
+          }, { class: 'small danger', 'data-busy-sensitive': '' })
+        ]),
+        tabsDetails(entry.tabs)
+      ]));
+    });
+    content.replaceChildren(list);
+    updateBusy();
+  }
+
+  /* ---------- Page-level events ---------- */
+  $('undo-button').addEventListener('click', async function(event) {
+    var result = await operation('action.undo', {}, event.currentTarget);
+    if (!result) return;
+    var changed = (result.changed || []).length;
+    showResult(changed ? 'Undone. ' + plural(changed, 'tab') + ' back as ' + (changed === 1 ? 'it was' : 'they were') + '.' : 'Nothing left to undo.', { skipped: result.skipped });
+  });
+  $('result-undo').addEventListener('click', function(event) { $('undo-button').click(); event.currentTarget.hidden = true; });
+  $('result-force').addEventListener('click', function(event) { if (force) run(force.action, force.ids, event.currentTarget, { ignoreDrafts: true, confirmed: true }); });
+  $('result-dismiss').addEventListener('click', function() { $('result').hidden = true; });
+  document.addEventListener('click', function(event) {
+    document.querySelectorAll('details.menu[open]').forEach(function(menuElement) { if (!menuElement.contains(event.target)) menuElement.open = false; });
+  });
   document.addEventListener('keydown', function(event) {
-    C.searchKeys(event, search);
-    if (event.key !== 'Escape' || event.defaultPrevented || busy || document.querySelector('dialog[open]')) return;
-    if (previewBox && previewBox.isConnected && !previewBox.hidden) {
-      event.preventDefault(); previewBox.hidden = true; restoreTrigger(previewTrigger); return;
+    if (event.key === 'Escape') {
+      var open = document.querySelector('details.menu[open]');
+      if (open) { open.open = false; open.querySelector('summary').focus(); return; }
+      if (route.view === 'tabs' && selected.size && !document.querySelector('dialog[open]')) { selected.clear(); renderTabs(); }
+      return;
     }
-    var panels = [workspaceEditor, bookmarkPanel, transitionPanel, comparePanel].filter(function(panel) { return panel && panel.isConnected; });
-    var panel = panels.find(function(item) { return item.contains(event.target); }) || panels[panels.length - 1];
-    if (panel) { event.preventDefault(); closeInlinePanel(panel); }
+    if (route.view === 'tabs' && tabsUi) C.searchKeys(event, tabsUi.search);
   });
   C.subscribe(refresh);
-  var refreshInterval = setInterval(function() { if (!document.hidden) refresh(); }, 15000);
-  window.addEventListener('pagehide', function() { clearInterval(refreshInterval); });
+  var interval = setInterval(function() { if (!document.hidden) refresh(); }, 15000);
+  window.addEventListener('pagehide', function() { clearInterval(interval); });
   window.addEventListener('focus', refresh);
   refresh();
 })();
